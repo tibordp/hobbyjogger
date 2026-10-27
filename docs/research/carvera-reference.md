@@ -129,7 +129,7 @@ OpenSpindle `transfer.ts`): **[C]**
 
 - **Tool change:** `M6 T<n>`, `M6 T-1` drop. TLO calibrate `M491` (community `M491.1` break check).
   `M490.1`/`.2` clamp/unclamp. `M493.2 T<n>` set current tool. Z1 handler also `M486`–`M499`, `M887`/`M888`.
-- **Probing:** G38.2–G38.5 → `[PRB:x,y,z:ok]`; failure `ALARM: Probe fail` (`ZProbe.cpp:599,604`).
+- **Probing:** G38.2–G38.5 → `[PRB:x,y,z:1]` (verified on Z1); failure `ALARM: Probe fail` (`ZProbe.cpp:599,604`).
   G38.6 calibration on Z1. Built-in 3D routines `M480.1`–`M480.10`; `M495.3 H D` XYZ probe.
   Community fw M460–M466.
 - **Autolevel / margin:** `M495 X Y [C D] [O F] [A B I J H] [P1 T]` (`Controller.py::autoCommand`);

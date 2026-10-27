@@ -1,0 +1,13 @@
+[package]
+name = "hj-sim"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+hj-makera = { version = "0.1.0", path = "../hj-makera" }
+tokio = { version = "1.54.1", features = ["net", "io-util", "sync", "time", "rt", "macros"] }
+tracing = "0.1.44"
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+{"note":"connected: usb 303a:4002 bus 02 addr 1 (interface 0, in 0x81, out 0x01)","t":0.005700791}
+{"dir":"tx","name":"CTRL_SINGLE","t":0.005827875,"text":"?","type":"0xa1"}
+{"dir":"tx","name":"CTRL_MULTI","t":0.005851625,"text":"version","type":"0xa2"}
+{"dir":"tx","name":"CTRL_MULTI","t":0.005861208,"text":"model","type":"0xa2"}
+{"dir":"tx","name":"CTRL_MULTI","t":0.005869125,"text":"ftype","type":"0xa2"}
+{"dir":"tx","name":"CTRL_MULTI","t":0.005876291,"text":"diagnose","type":"0xa2"}
+{"dir":"rx","name":"STATUS","t":0.022738083,"text":"<Idle|MPos:-1.0000,-1.0000,-1.0000,0.0000,0.0000|WPos:66.4050,123.9570,45.3106,0.0000,0.0000|F:0.0,2000.0,100.0|S:0.0,10000.0,100.0,0,22.8,25.0,0,0,0,0|T:3,-18.211,-1|L:0, 0, 0, 0.0,100.0|C:3,1,0,1|E:0,0,0,25,7613|OTA:0,0>\n","type":"0x81"}
+{"dir":"rx","name":"NORMAL_INFO","t":0.032471416,"text":"version = 1.1.2.0.1.13\n","type":"0x90"}
+{"dir":"rx","name":"NORMAL_INFO","t":0.052322,"text":"ftype = nc\r\n","type":"0x90"}
+{"dir":"rx","name":"DIAGNOSE","t":0.062570166,"text":"{S:0,10000,0,0,22,24|L:0,0|V:1,32|F:0,0|G:1,0,0,0,0|T:0|C:1|E:0,0,0,0,0,1,1,0|P:0,0|I:0|RSSI:-53}\n","type":"0x82"}
+{"dir":"rx","name":"NORMAL_INFO","t":0.062646041,"text":"model = Z1, 3, 1, 0, Idle\n","type":"0x90"}

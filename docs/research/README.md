@@ -7,6 +7,7 @@ real Z1 yet.
   open questions for hands-on testing.
 - [carvera-reference.md](carvera-reference.md) — detailed protocol reference extracted from the
   Makera / Carvera open-source firmware and controllers, with file pointers.
+- [probing.md](probing.md) — probing building blocks and verified touch-off routines.
 - [oss-prior-art.md](oss-prior-art.md) — general CNC senders, probing routines, conversational CAM,
   Rust/React libraries.
 
@@ -22,12 +23,12 @@ real Z1 yet.
    TCP 2222 (WiFi, discovery via UDP 3333 broadcast) or **USB vendor bulk** (VID 0x303A /
    PID 0x4002 — libusb, *not* a serial port). The transport abstraction is "a byte stream of
    frames", the framing codec sits above it.
-4. **Jobs run from the machine's SD card.** Upload is machine-pulled, block-based, optionally
-   QuickLZ-compressed; then `play`. Interactive things (jog, MDI, probing) are individual command
+4. **Jobs run from the machine's SD card.** Upload is machine-pulled and block-based (no
+   compression on the stock Z1); then `play`. Interactive things (jog, MDI, probing) are individual command
    frames.
 5. **Status is a Carvera-style `<State|MPos|WPos|F|S|T|...>` line** with a well-defined halt-reason
    enum — good basis for the Rust machine-state model.
-6. **Probing primitives exist and report cleanly** (`G38.x` → `[PRB:x,y,z:ok]`), so Rust-side
+6. **Probing primitives exist and report cleanly** (`G38.x` → `[PRB:x,y,z:1]` (verified on Z1)), so Rust-side
    orchestrated probing routines are viable.
 7. **Licensing.** Almost all Makera/Carvera code is GPL; we're GPL-3.0 too (see below). MIT references
    worth reading closely: [OpenSpindle](https://github.com/openspindle/openspindle) (Z1 controller

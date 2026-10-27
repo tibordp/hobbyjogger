@@ -1,0 +1,4 @@
+# Makera Z1 (ESP32 vendor-class USB device). Grants the logged-in user access so Hobby Jogger
+# can open it without root.
+#   sudo cp 99-makera-z1.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4002", MODE="0660", TAG+="uaccess"
