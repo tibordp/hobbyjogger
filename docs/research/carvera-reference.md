@@ -104,7 +104,8 @@ Host usage (community `Controller.py`):
 - Jobs: `play <file> [-O]`, `suspend`, `resume`, `abort`.
 - Info: `model` → `model = Z1, <id>, <func>, <x>`; `version`; `ftype` (`.lz` support); `time <unix>`.
 - Config: `config-get-all -e`, `config-set sd <key> <val>`, `config-restore`, `config-default`.
-- Arg escaping: space → `\x01`, `? & ! ~` → `\x02`–`\x05` (`Controller.py::escape`). **[C]**
+- Arg escaping: space → `\x01`, `? & ! ~` → `\x02`–`\x05` (`Controller.py::escape`; Hobby
+  Jogger had `*` for `\x03` until 2026-10-27). **[C]**
 - `buffer <cmd>` queues into the job. Jog `$J X.. [F..]` (community: `$J -c` continuous). Home `$H`.
 
 ## File transfer
@@ -135,6 +136,16 @@ OpenSpindle `transfer.ts`): **[C]**
 - **Autolevel / margin:** `M495 X Y [C D] [O F] [A B I J H] [P1 T]` (`Controller.py::autoCommand`);
   clear `M370`; `O:` field = max delta.
 - **Laser:** `M321`/`M322` on/off, `M323`/`M324` test, `M325 S` scale, fire `M3 S<0..1>`.
+  On the Z1 (and Air) `M321` also does `M6 T8888` (a manual tool change to the laser module),
+  `G92.5 Z0`, and runs the power fan at 40 % (`M801 S40`); `M322` does `G92.1` and leaves the
+  tool alone. Test fire runs at `laser_module_test_power` × scale (`Laser.cpp`, 1.1.3). **[C]**
+- **Diagnose on the Z1** (`Kernel::get_diagnose_string`, 1.1.3): `V` is the power fan on machines
+  without an ATC (vacuum with one), `F` the spindle fan, `G:light,beep,extin,extout,extoutPWM`,
+  `R` air (absent on the Z1 seen so far), `T` tool sensor, `C` probe charger. **[C]**
+- **`config-get-all -e`** prints `/sd/config.txt` as `key=value` lines, then an EOT (0x04)
+  without a newline (`SimpleShell::config_get_all_command`). **[C]** On the Z1 over WiFi
+  (2026-10-28) nothing recognisable came back; the community controller downloads
+  `/sd/config.txt` instead, and so does Hobby Jogger.
 - **Overrides:** feed `M220 S%`, spindle `M223 S%`.
 - **Outputs:** vacuum M801/M802, spindle fan M811/M812, light M821/M822, ext out M851/M852,
   tool sensor M831/M832, air M7/M9, modes M331/M332 (.3 ext-out, .4 ionizer), Z1 timelapse M951/M952.

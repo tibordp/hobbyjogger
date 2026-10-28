@@ -2,6 +2,9 @@
 //! of the UI framework. See `docs/architecture.md`.
 
 mod core;
+pub mod probe;
+pub mod program;
+pub mod settings;
 pub mod state;
 pub mod sync;
 

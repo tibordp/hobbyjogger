@@ -25,6 +25,7 @@ hj-core = { version = "0.1.0", path = "../../crates/hj-core" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+tauri-plugin-dialog = "2"
 
 
 [lints]

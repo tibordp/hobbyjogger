@@ -4,7 +4,9 @@
 
 A CNC controller and CAM-lite for hobby desktop CNCs, starting with the Makera Z1. An alternative
 to Makera Studio. Early days: the desktop app connects over WiFi or USB and does status, jogging,
-homing, work offsets and a console; job upload, probing and toolpath generators come next.
+homing, work offsets, a console, and G-code jobs (an editor with highlighting, completion and
+checks, a toolpath preview on the bed, upload, run/pause/stop and an SD card browser). Probing and
+toolpath generators come next.
 
 ## Layout
 
@@ -12,6 +14,7 @@ homing, work offsets and a console; job upload, probing and toolpath generators 
 - `crates/hj-core` — app state and machine logic, synced to the frontend as patches.
 - `crates/hj-makera` — Makera framed protocol: frame codec, status/diagnose parsing, TCP and USB
   transports, WiFi discovery.
+- `crates/hj-gcode` — G-code analysis for the preview and checks.
 - `crates/hj-sim` — a simulated Z1 for tests and for trying the app without a machine.
 - `crates/hj-cli` — `hj`, a low-level tool for talking to the machine.
 - `docs/architecture.md` — how the pieces fit together.

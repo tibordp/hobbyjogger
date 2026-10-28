@@ -63,6 +63,20 @@ enum Cmd {
         /// Destination path on the machine (default: /sd/gcodes/<file name>).
         remote: Option<String>,
     },
+    /// Download a file from the machine's SD card.
+    Download {
+        #[command(flatten)]
+        target: Target,
+        #[command(flatten)]
+        log: LogArgs,
+        /// Path on the machine, e.g. /sd/gcodes/part.nc.
+        remote: String,
+        /// Where to write it (default: the file name, in the current directory).
+        out: Option<PathBuf>,
+        /// Skip the transfer if the machine's copy matches this local file.
+        #[arg(long)]
+        unless_same_as: Option<PathBuf>,
+    },
     /// Probe a cylinder lying along X (e.g. the tailstock) from both Y sides and report its centre.
     /// Start with the probe in the spindle, idle, somewhere above the part. Read-only: no work
     /// offsets are changed. Ctrl-C halts the machine.
@@ -134,6 +148,13 @@ async fn main() -> Result<()> {
             file,
             remote,
         } => upload(target, log, file, remote).await,
+        Cmd::Download {
+            target,
+            log,
+            remote,
+            out,
+            unless_same_as,
+        } => download(target, log, remote, out, unless_same_as).await,
         Cmd::ProbeCylinderY {
             target,
             log,
@@ -443,6 +464,74 @@ async fn upload(target: Target, log: LogArgs, file: PathBuf, remote: Option<Stri
     Ok(())
 }
 
+async fn download(
+    target: Target,
+    log: LogArgs,
+    remote: String,
+    out: Option<PathBuf>,
+    unless_same_as: Option<PathBuf>,
+) -> Result<()> {
+    let out = match out {
+        Some(o) => o,
+        None => PathBuf::from(remote.rsplit('/').next().context("no file name")?),
+    };
+    let have_md5 = match &unless_same_as {
+        Some(p) => Some(transfer::md5_hex(
+            &std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
+        )),
+        None => None,
+    };
+    let mut log = FrameLog::open(&log)?;
+    let mut conn = Connection::start(open(&target).await?);
+    eprintln!("connected: {}; downloading {remote}", conn.description);
+    log.note(&format!("connected: {}", conn.description));
+    let started = Instant::now();
+    let mut d = transfer::Download::new(&remote, have_md5);
+    send(&conn, &mut log, d.start()).await?;
+    let result = loop {
+        let event = tokio::time::timeout(Duration::from_secs(12), conn.events.recv())
+            .await
+            .context("no response from the machine")?
+            .context("connection closed")?;
+        let Event::Frame(frame) = &event else {
+            print_event(&event, &mut log, StatusDisplay::None, &mut None);
+            continue;
+        };
+        log.record("rx", frame);
+        match d.receive(frame)? {
+            transfer::DownloadStep::Send(frames) => {
+                for f in frames {
+                    send(&conn, &mut log, f).await?;
+                }
+                if let Some(total) = d.blocks() {
+                    eprint!("\r{}/{total} blocks", d.received_blocks);
+                }
+            }
+            transfer::DownloadStep::Done(result) => break result,
+            transfer::DownloadStep::Ignored => {}
+        }
+    };
+    eprintln!();
+    match result {
+        transfer::Downloaded::Unchanged => eprintln!("unchanged; nothing downloaded"),
+        transfer::Downloaded::Data(data) => {
+            std::fs::write(&out, &data).with_context(|| format!("writing {}", out.display()))?;
+            eprintln!(
+                "{} bytes to {} in {:.2}s",
+                data.len(),
+                out.display(),
+                started.elapsed().as_secs_f64()
+            );
+        }
+    }
+    // Let trailing replies arrive so they're logged.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(event) = conn.events.try_recv() {
+        print_event(&event, &mut log, StatusDisplay::None, &mut None);
+    }
+    Ok(())
+}
+
 async fn console(target: Target, log: LogArgs, poll_ms: u64, display: StatusDisplay) -> Result<()> {
     let mut log = FrameLog::open(&log)?;
     let mut conn = Connection::start(open(&target).await?);
@@ -550,6 +639,7 @@ fn print_event(
         Event::Message(Message::Diagnose(d)) => println!("diagnose: {:?}", d.0),
         Event::Message(Message::Malformed { line, error }) => println!("?? {error}: {line}"),
         Event::Message(Message::Line(line)) => println!("< {line}"),
+        Event::Message(Message::Eot) => println!("< EOT"),
         Event::Message(Message::LoadInfo(p)) => {
             println!("load info: {}", String::from_utf8_lossy(p))
         }

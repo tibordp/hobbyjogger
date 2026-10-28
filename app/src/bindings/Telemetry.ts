@@ -17,6 +17,10 @@ work: [number, number, number, number, number],
  */
 feed: number, spindleRpm: number, spindleTemp: number | null, powerTemp: number | null, 
 /**
+ * Laser output, percent of full PWM, while in laser mode.
+ */
+laserPower: number | null, 
+/**
  * False when the firmware reports a planned end position rather than the live one
  * (`Hold`, `Wait`, `Pause`).
  */

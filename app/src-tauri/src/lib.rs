@@ -1,8 +1,10 @@
 //! Tauri adapter: forwards commands to `hj-core` and turns its published changes into events.
 //! All application logic lives in `hj-core`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use hj_core::program::{self, Analysis, Program, reference};
 use hj_core::state::{ConsoleEntry, Request, Telemetry};
 use hj_core::{Core, CoreError, Sink, Snapshot, StateUpdate};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -36,10 +38,53 @@ async fn request(core: State<'_, Core>, request: Request) -> Result<(), CoreErro
     core.request(request).await
 }
 
+#[tauri::command]
+async fn analyze_gcode(text: String) -> Analysis {
+    tauri::async_runtime::spawn_blocking(move || program::analyze(&text))
+        .await
+        .unwrap_or_default()
+}
+
+/// What each G/M code and console command does, for completion and help.
+#[tauri::command]
+fn gcode_reference() -> Vec<reference::CodeRef> {
+    reference::codes()
+}
+
+#[tauri::command]
+async fn open_program(path: PathBuf) -> Result<Program, String> {
+    tauri::async_runtime::spawn_blocking(move || program::read(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn save_program(path: PathBuf, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || program::write(&path, &text))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Download a program from the machine's SD card. `None` if it's identical to `have`.
+#[tauri::command]
+async fn download_program(
+    core: State<'_, Core>,
+    path: String,
+    have: Option<String>,
+) -> Result<Option<Program>, CoreError> {
+    let data = core.download(path.clone(), have.as_deref()).await?;
+    Ok(data.map(|data| Program {
+        name: path.rsplit('/').next().unwrap_or_default().to_owned(),
+        text: String::from_utf8_lossy(&data).into_owned(),
+        path,
+    }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let sink = Arc::new(EventSink(app.handle().clone()));
             // The core spawns its tasks on Tauri's tokio runtime.
@@ -50,7 +95,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_state,
             console_history,
-            request
+            request,
+            analyze_gcode,
+            gcode_reference,
+            open_program,
+            save_program,
+            download_program
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

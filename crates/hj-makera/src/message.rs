@@ -15,12 +15,16 @@ pub enum Message {
     /// A complete line of console output (`ok`, `ALARM: ...`, command replies, ...), without the
     /// line terminator.
     Line(String),
+    /// End of transmission (0x04): ends a listing such as `config-get-all -e`, without a newline.
+    Eot,
     LoadInfo(Vec<u8>),
     LoadFinish,
     LoadError(Vec<u8>),
     /// File transfer and anything else we don't interpret yet.
     Other(Frame),
 }
+
+const EOT: char = '\u{4}';
 
 /// Stateful interpreter: console text can arrive split across several frames, so lines are
 /// assembled before they are classified.
@@ -44,11 +48,15 @@ impl Interpreter {
                 self.partial
                     .push_str(&String::from_utf8_lossy(&frame.payload));
                 let mut out = vec![];
-                while let Some(i) = self.partial.find('\n') {
+                while let Some(i) = self.partial.find(['\n', EOT]) {
                     let line: String = self.partial.drain(..=i).collect();
-                    let line = line.trim_end_matches(['\r', '\n']);
+                    let eot = line.ends_with(EOT);
+                    let line = line.trim_end_matches(['\r', '\n', EOT]);
                     if !line.is_empty() {
                         out.push(classify(line));
+                    }
+                    if eot {
+                        out.push(Message::Eot);
                     }
                 }
                 out
@@ -95,6 +103,20 @@ mod tests {
             ]
         );
         assert_eq!(i.feed(info("ial\n")), vec![Message::Line("partial".into())]);
+    }
+
+    #[test]
+    fn eot_ends_a_listing() {
+        let mut i = Interpreter::new();
+        assert_eq!(
+            i.feed(info("a=1\nb=2\n\u{4}ok\n")),
+            vec![
+                Message::Line("a=1".into()),
+                Message::Line("b=2".into()),
+                Message::Eot,
+                Message::Line("ok".into())
+            ]
+        );
     }
 
     #[test]

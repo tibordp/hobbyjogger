@@ -47,9 +47,23 @@ pub fn escape_arg(arg: &str) -> String {
         .map(|c| match c {
             ' ' => '\x01',
             '?' => '\x02',
-            '*' => '\x03',
+            '&' => '\x03',
             '!' => '\x04',
             '~' => '\x05',
+            c => c,
+        })
+        .collect()
+}
+
+/// Reverse [`escape_arg`], for names the machine sends back (directory listings).
+pub fn unescape_arg(arg: &str) -> String {
+    arg.chars()
+        .map(|c| match c {
+            '\x01' => ' ',
+            '\x02' => '?',
+            '\x03' => '&',
+            '\x04' => '!',
+            '\x05' => '~',
             c => c,
         })
         .collect()
@@ -70,5 +84,6 @@ mod tests {
             escape_arg("/sd/gcodes/my part?!.nc"),
             "/sd/gcodes/my\x01part\x02\x04.nc"
         );
+        assert_eq!(unescape_arg(&escape_arg("my part?!.nc")), "my part?!.nc");
     }
 }

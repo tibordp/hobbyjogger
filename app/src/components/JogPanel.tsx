@@ -15,8 +15,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { act } from "@/lib/actions";
+import { type Dir, dirKey, press, release, releaseAll, useJogPresses } from "@/lib/jog";
 import { canJog, useConnected, useJobRunning, useMachineState } from "@/lib/machine";
 import { useUi } from "@/lib/ui";
+import { cn } from "@/lib/utils";
 
 const STEPS = [0.01, 0.1, 1, 10, 50];
 /** A-axis steps in degrees, paired with the linear steps. */
@@ -24,7 +26,61 @@ const A_STEPS = [0.1, 1, 5, 15, 90];
 /** Fraction of the axis max rate. */
 const SPEEDS = [0.1, 0.25, 0.5, 1];
 
-type Dir = { x?: number; y?: number; z?: number; a?: number };
+const KEYS: Record<string, Dir> = {
+  ArrowLeft: { x: -1 },
+  ArrowRight: { x: 1 },
+  ArrowUp: { y: 1 },
+  ArrowDown: { y: -1 },
+  PageUp: { z: 1 },
+  PageDown: { z: -1 },
+};
+
+/** A jog button: click for a step, hold for continuous motion. */
+function JogButton({
+  dir,
+  step,
+  enabled,
+  label,
+  children,
+}: {
+  dir: Dir;
+  step: () => void;
+  enabled: boolean;
+  label: string;
+  children: React.ReactNode;
+}) {
+  // Lit while pressed, by pointer or key; brighter once it's moving continuously.
+  const pressed = useJogPresses((s) => s.pressed.includes(dirKey(dir)));
+  const held = useJogPresses((s) => s.held.includes(dirKey(dir)));
+  return (
+    <Button
+      variant="secondary"
+      className={cn(
+        "h-12 touch-none",
+        pressed && "ring-2 ring-sky-400/60",
+        held && "bg-sky-500/25 ring-sky-400",
+      )}
+      disabled={!enabled}
+      title={`${label}: click for a step, hold to keep moving`}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        press("pointer", dir, step);
+        // Released wherever the pointer goes up, even if the button got disabled meanwhile.
+        const up = () => {
+          window.removeEventListener("pointerup", up);
+          window.removeEventListener("pointercancel", up);
+          release("pointer");
+        };
+        window.addEventListener("pointerup", up);
+        window.addEventListener("pointercancel", up);
+      }}
+      // Keyboard activation (Enter, Space) is a step.
+      onClick={(e) => e.detail === 0 && step()}
+    >
+      {children}
+    </Button>
+  );
+}
 
 export function JogPanel() {
   const connected = useConnected();
@@ -50,42 +106,34 @@ export function JogPanel() {
     });
   };
 
-  // Keyboard jogging: arrows for XY, Page Up/Down for Z, Escape to stop. Key repeat is ignored so
-  // holding a key doesn't queue a pile of moves.
+  // Keyboard jogging: arrows for XY, Page Up/Down for Z; tap for a step, hold to keep moving
+  // (two arrows for a diagonal). Escape halts. Key repeat is ignored: holding is handled above it.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onDown = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
-      if (el.closest("input, textarea, select, [contenteditable]") || e.repeat) return;
-      const map: Record<string, Dir> = {
-        ArrowLeft: { x: -1 },
-        ArrowRight: { x: 1 },
-        ArrowUp: { y: 1 },
-        ArrowDown: { y: -1 },
-        PageUp: { z: 1 },
-        PageDown: { z: -1 },
-      };
+      if (el.closest("input, textarea, select, [contenteditable]")) return;
       if (e.key === "Escape") {
+        releaseAll();
         void act({ type: "stopJog" });
-      } else if (map[e.key]) {
+      } else if (KEYS[e.key] && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
-        jog(map[e.key]);
+        if (!e.repeat && enabled) press(e.key, KEYS[e.key], () => jog(KEYS[e.key]));
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onUp = (e: KeyboardEvent) => release(e.key);
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+    };
   });
+  // Key-ups don't arrive while the window is in the background.
+  useEffect(() => {
+    window.addEventListener("blur", releaseAll);
+    return () => window.removeEventListener("blur", releaseAll);
+  }, []);
 
-  const Btn = ({ d, children, label }: { d: Dir; children: React.ReactNode; label: string }) => (
-    <Button
-      variant="secondary"
-      className="h-12"
-      disabled={!enabled}
-      title={label}
-      onClick={() => jog(d)}
-    >
-      {children}
-    </Button>
-  );
 
   return (
     <Card size="sm">
@@ -96,40 +144,40 @@ export function JogPanel() {
         <div className="flex gap-4">
           <div className="grid flex-1 grid-cols-3 gap-2">
             <span />
-            <Btn d={{ y: 1 }} label="Y+ (↑)">
+            <JogButton dir={{ y: 1 }} step={() => jog({ y: 1 })} enabled={enabled} label="Y+ (↑)">
               <ArrowUp /> Y+
-            </Btn>
+            </JogButton>
             <span />
-            <Btn d={{ x: -1 }} label="X− (←)">
+            <JogButton dir={{ x: -1 }} step={() => jog({ x: -1 })} enabled={enabled} label="X− (←)">
               <ArrowLeft /> X−
-            </Btn>
+            </JogButton>
             <span />
-            <Btn d={{ x: 1 }} label="X+ (→)">
+            <JogButton dir={{ x: 1 }} step={() => jog({ x: 1 })} enabled={enabled} label="X+ (→)">
               X+ <ArrowRight />
-            </Btn>
+            </JogButton>
             <span />
-            <Btn d={{ y: -1 }} label="Y− (↓)">
+            <JogButton dir={{ y: -1 }} step={() => jog({ y: -1 })} enabled={enabled} label="Y− (↓)">
               <ArrowDown /> Y−
-            </Btn>
+            </JogButton>
             <span />
           </div>
           <div className="grid w-20 grid-rows-3 gap-2">
-            <Btn d={{ z: 1 }} label="Z+ (Page Up)">
+            <JogButton dir={{ z: 1 }} step={() => jog({ z: 1 })} enabled={enabled} label="Z+ (Page Up)">
               <ChevronsUp /> Z+
-            </Btn>
+            </JogButton>
             <span />
-            <Btn d={{ z: -1 }} label="Z− (Page Down)">
+            <JogButton dir={{ z: -1 }} step={() => jog({ z: -1 })} enabled={enabled} label="Z− (Page Down)">
               <ChevronsDown /> Z−
-            </Btn>
+            </JogButton>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <Btn d={{ a: -1 }} label="A−">
+          <JogButton dir={{ a: -1 }} step={() => jog({ a: -1 })} enabled={enabled} label="A−">
             <RotateCcw /> A− {aStep}°
-          </Btn>
-          <Btn d={{ a: 1 }} label="A+">
+          </JogButton>
+          <JogButton dir={{ a: 1 }} step={() => jog({ a: 1 })} enabled={enabled} label="A+">
             A+ {aStep}° <RotateCw />
-          </Btn>
+          </JogButton>
         </div>
 
         <div className="space-y-1.5">

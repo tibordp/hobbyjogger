@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+hj-gcode = { version = "0.1.0", path = "../hj-gcode" }
 hj-makera = { version = "0.1.0", path = "../hj-makera" }
 hj-sim = { version = "0.1.0", path = "../hj-sim" }
 json-patch = "4.2.0"

@@ -6,6 +6,7 @@ pub mod connection;
 pub mod discovery;
 pub mod frame;
 pub mod message;
+pub mod sd;
 pub mod status;
 pub mod transfer;
 pub mod transport;

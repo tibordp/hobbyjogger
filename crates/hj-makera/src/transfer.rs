@@ -9,6 +9,18 @@
 //!
 //! `FILE_MD5` from the machine asks for the digest again and `FILE_RETRY` asks for the last frame
 //! again.
+//!
+//! Downloads are the mirror image, driven by the host (as the community controller's
+//! `XMODEM.recv`; on the Z1 the ESP32 handles both, the motion firmware only has stubs):
+//!
+//! 1. host → `FILE_START` `download <path>`; machine → `FILE_MD5` with the file's digest
+//! 2. host → `FILE_VIEW` (empty), or `FILE_CANCEL` if it already has a file with that digest;
+//!    machine → `FILE_VIEW` `u32 block_count, u16 block_size` (8 KiB over WiFi)
+//! 3. host → `FILE_DATA` `u32 seq` (1-based); machine → `FILE_DATA` `u32 seq` + block
+//! 4. host → `FILE_END` after the last block; machine → `FILE_END` `ok` and a console line
+//!    `Info: download success: <path>.` After a cancel the machine echoes `FILE_CANCEL`
+//!    `Info: canceled by remote!`; for a missing file it cancels with
+//!    `Error: failed to open file [<path>]!`.
 
 use std::time::Duration;
 
@@ -35,6 +47,8 @@ pub enum TransferError {
     BadSequence(u32, u32),
     #[error("file too large for {0}-byte blocks")]
     TooLarge(u16),
+    #[error("the received file doesn't match its checksum (expected {expected}, got {actual})")]
+    Corrupt { expected: String, actual: String },
     #[error("no response from the machine for {0:?}")]
     Timeout(Duration),
     #[error(transparent)]
@@ -51,9 +65,9 @@ pub fn md5_hex(data: &[u8]) -> String {
 }
 
 /// Sans-IO upload state machine.
-pub struct Upload<'a> {
+pub struct Upload {
     path: String,
-    data: &'a [u8],
+    data: Vec<u8>,
     md5: String,
     block_size: u16,
     blocks: u32,
@@ -70,14 +84,19 @@ pub enum Step {
     Done,
 }
 
-impl<'a> Upload<'a> {
-    pub fn new(path: &str, data: &'a [u8], block_size: u16) -> Result<Self, TransferError> {
+impl Upload {
+    pub fn new(
+        path: &str,
+        data: impl Into<Vec<u8>>,
+        block_size: u16,
+    ) -> Result<Self, TransferError> {
+        let data = data.into();
         let blocks = u32::try_from(data.len().div_ceil(usize::from(block_size)))
             .map_err(|_| TransferError::TooLarge(block_size))?;
         Ok(Self {
             path: path.to_owned(),
+            md5: md5_hex(&data),
             data,
-            md5: md5_hex(data),
             block_size,
             blocks,
             last: None,
@@ -87,6 +106,19 @@ impl<'a> Upload<'a> {
 
     pub fn blocks(&self) -> u32 {
         self.blocks
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Bytes sent so far.
+    pub fn sent_bytes(&self) -> usize {
+        (self.sent_blocks as usize * usize::from(self.block_size)).min(self.data.len())
     }
 
     pub fn md5(&self) -> &str {
@@ -203,6 +235,178 @@ pub async fn upload(
     }
 }
 
+/// What the machine sent us, once a [`Download`] is over.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Downloaded {
+    Data(Vec<u8>),
+    /// The file's digest matched the one we said we already have; nothing was transferred.
+    Unchanged,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DownloadStep {
+    Send(Vec<Frame>),
+    /// The machine has confirmed the end of the transfer. It keeps the file open until then:
+    /// deleting it right after our `FILE_END` fails.
+    Done(Downloaded),
+    /// Not a transfer frame; the caller should handle it.
+    Ignored,
+}
+
+/// Sans-IO download state machine.
+pub struct Download {
+    path: String,
+    have_md5: Option<String>,
+    md5: Option<String>,
+    blocks: Option<u32>,
+    block_size: Option<u16>,
+    data: Vec<u8>,
+    last: Option<Frame>,
+    /// Set once we've ended the transfer; handed out when the machine confirms.
+    outcome: Option<Downloaded>,
+    /// Blocks received so far.
+    pub received_blocks: u32,
+}
+
+impl Download {
+    /// `have_md5`: the digest of a copy we already have, to skip the transfer if it matches.
+    pub fn new(path: &str, have_md5: Option<String>) -> Self {
+        Self {
+            path: path.to_owned(),
+            have_md5,
+            md5: None,
+            blocks: None,
+            block_size: None,
+            data: vec![],
+            last: None,
+            outcome: None,
+            received_blocks: 0,
+        }
+    }
+
+    /// The result, if we've ended the transfer but the machine hasn't confirmed (it went quiet).
+    pub fn take_outcome(&mut self) -> Option<Downloaded> {
+        self.outcome.take()
+    }
+
+    /// Total blocks, once the machine has said.
+    pub fn blocks(&self) -> Option<u32> {
+        self.blocks
+    }
+
+    /// An upper bound on the file size, once the machine has said how many blocks it has.
+    pub fn expected_bytes(&self) -> Option<u64> {
+        Some(u64::from(self.blocks?) * u64::from(self.block_size?))
+    }
+
+    pub fn received_bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn start(&self) -> Frame {
+        Frame::new(
+            FrameType::FILE_START,
+            format!("download {}\n", escape_arg(&self.path)).into_bytes(),
+        )
+    }
+
+    fn send(&mut self, frame: Frame) -> DownloadStep {
+        self.last = Some(frame.clone());
+        DownloadStep::Send(vec![frame])
+    }
+
+    fn request(&mut self, seq: u32) -> DownloadStep {
+        self.send(Frame::new(FrameType::FILE_DATA, seq.to_be_bytes()))
+    }
+
+    pub fn receive(&mut self, frame: &Frame) -> Result<DownloadStep, TransferError> {
+        if self.outcome.is_some() {
+            return Ok(match frame.kind {
+                FrameType::FILE_END | FrameType::FILE_CANCEL => {
+                    DownloadStep::Done(self.outcome.take().expect("checked"))
+                }
+                _ => DownloadStep::Ignored,
+            });
+        }
+        Ok(match frame.kind {
+            FrameType::FILE_MD5 if self.md5.is_none() => {
+                let md5 = String::from_utf8_lossy(&frame.payload)
+                    .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                    .to_ascii_lowercase();
+                if is_md5(&md5) && self.have_md5.as_deref() == Some(md5.as_str()) {
+                    self.outcome = Some(Downloaded::Unchanged);
+                    return Ok(DownloadStep::Send(vec![Frame::new(
+                        FrameType::FILE_CANCEL,
+                        [],
+                    )]));
+                }
+                self.md5 = Some(md5);
+                self.send(Frame::new(FrameType::FILE_VIEW, []))
+            }
+            FrameType::FILE_VIEW if frame.payload.len() >= 4 => {
+                let p = &frame.payload;
+                let blocks = u32::from_be_bytes([p[0], p[1], p[2], p[3]]);
+                self.blocks = Some(blocks);
+                self.block_size = (p.len() >= 6).then(|| u16::from_be_bytes([p[4], p[5]]));
+                if blocks == 0 {
+                    return self.finish();
+                }
+                self.request(1)
+            }
+            FrameType::FILE_DATA if frame.payload.len() >= 4 => {
+                let p = &frame.payload;
+                let seq = u32::from_be_bytes([p[0], p[1], p[2], p[3]]);
+                let blocks = self.blocks.unwrap_or(0);
+                if seq != self.received_blocks + 1 || seq > blocks {
+                    // Out of order (a retransmission); ask again for the one we need.
+                    return Ok(self.request(self.received_blocks + 1));
+                }
+                self.data.extend_from_slice(&p[4..]);
+                self.received_blocks = seq;
+                if seq < blocks {
+                    self.request(seq + 1)
+                } else {
+                    return self.finish();
+                }
+            }
+            FrameType::FILE_RETRY => match self.last.clone() {
+                Some(last) => DownloadStep::Send(vec![last]),
+                None => DownloadStep::Ignored,
+            },
+            FrameType::FILE_CANCEL => {
+                let reason = String::from_utf8_lossy(&frame.payload).trim().to_owned();
+                return Err(TransferError::Cancelled(
+                    (!reason.is_empty()).then_some(reason),
+                ));
+            }
+            _ => DownloadStep::Ignored,
+        })
+    }
+
+    fn finish(&mut self) -> Result<DownloadStep, TransferError> {
+        let data = std::mem::take(&mut self.data);
+        // Some firmware sends a placeholder instead of a digest; only check real ones.
+        if let Some(md5) = self.md5.as_deref().filter(|m| is_md5(m)) {
+            let actual = md5_hex(&data);
+            if actual != md5 {
+                return Err(TransferError::Corrupt {
+                    expected: md5.to_owned(),
+                    actual,
+                });
+            }
+        }
+        self.outcome = Some(Downloaded::Data(data));
+        Ok(DownloadStep::Send(vec![Frame::new(
+            FrameType::FILE_END,
+            [],
+        )]))
+    }
+}
+
+fn is_md5(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn is_transfer_frame(kind: FrameType) -> bool {
     (FrameType::FILE_START.0..=FrameType::FILE_RETRY.0).contains(&kind.0)
 }
@@ -268,6 +472,73 @@ mod tests {
         assert!(matches!(
             up.receive(&Frame::new(FrameType::FILE_CANCEL, *b"open failed\r\n")),
             Err(TransferError::Cancelled(Some(r))) if r == "open failed"
+        ));
+    }
+
+    #[test]
+    fn download_handshake() {
+        let data = b"G0 X0\nG0 X1\n";
+        let mut d = Download::new("/sd/gcodes/a b.nc", None);
+        assert_eq!(d.start().payload, b"download /sd/gcodes/a\x01b.nc\n");
+        let md5 = md5_hex(data);
+        assert_eq!(
+            d.receive(&Frame::new(FrameType::FILE_MD5, md5.as_bytes()))
+                .unwrap(),
+            DownloadStep::Send(vec![Frame::new(FrameType::FILE_VIEW, [])])
+        );
+        assert_eq!(
+            d.receive(&Frame::new(FrameType::FILE_VIEW, [0, 0, 0, 2, 0, 8]))
+                .unwrap(),
+            DownloadStep::Send(vec![data_req(1)])
+        );
+        let block = |seq: u32, b: &[u8]| {
+            Frame::new(FrameType::FILE_DATA, [&seq.to_be_bytes()[..], b].concat())
+        };
+        assert_eq!(
+            d.receive(&block(1, &data[..8])).unwrap(),
+            DownloadStep::Send(vec![data_req(2)])
+        );
+        // A repeated block is ignored and the next one asked for again.
+        assert_eq!(
+            d.receive(&block(1, &data[..8])).unwrap(),
+            DownloadStep::Send(vec![data_req(2)])
+        );
+        assert_eq!(
+            d.receive(&block(2, &data[8..])).unwrap(),
+            DownloadStep::Send(vec![Frame::new(FrameType::FILE_END, [])])
+        );
+        assert_eq!(
+            d.receive(&Frame::new(FrameType::FILE_END, *b"ok\r\n"))
+                .unwrap(),
+            DownloadStep::Done(Downloaded::Data(data.to_vec()))
+        );
+    }
+
+    #[test]
+    fn download_skips_a_file_we_have_and_checks_digests() {
+        let mut d = Download::new("/sd/x.nc", Some(md5_hex(b"abc")));
+        assert_eq!(
+            d.receive(&Frame::new(FrameType::FILE_MD5, md5_hex(b"abc").as_bytes()))
+                .unwrap(),
+            DownloadStep::Send(vec![Frame::new(FrameType::FILE_CANCEL, [])])
+        );
+        assert_eq!(
+            d.receive(&Frame::new(
+                FrameType::FILE_CANCEL,
+                *b"Info: canceled by remote!\r\n"
+            ))
+            .unwrap(),
+            DownloadStep::Done(Downloaded::Unchanged)
+        );
+
+        let mut d = Download::new("/sd/x.nc", None);
+        d.receive(&Frame::new(FrameType::FILE_MD5, md5_hex(b"abc").as_bytes()))
+            .unwrap();
+        d.receive(&Frame::new(FrameType::FILE_VIEW, [0, 0, 0, 1]))
+            .unwrap();
+        assert!(matches!(
+            d.receive(&Frame::new(FrameType::FILE_DATA, [0, 0, 0, 1, b'x'])),
+            Err(TransferError::Corrupt { .. })
         ));
     }
 }

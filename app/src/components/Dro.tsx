@@ -1,11 +1,12 @@
-import { TriangleAlert } from "lucide-react";
+import { ChevronRight, TriangleAlert, Wrench } from "lucide-react";
 import { useState } from "react";
 
+import { ToolPicker } from "@/components/ToolPicker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { act } from "@/lib/actions";
-import { STATE_LABEL, useConnected, useJobRunning, useStatus } from "@/lib/machine";
+import { STATE_LABEL, toolName, useConnected, useJobRunning, useStatus } from "@/lib/machine";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 
@@ -26,11 +27,6 @@ function fmt(v: number | undefined, digits = 3) {
   return v === undefined ? "—" : v.toFixed(digits);
 }
 
-function toolName(n: number) {
-  if (n === 9999) return "3D probe";
-  if (n < 0) return "none";
-  return `T${n}`;
-}
 
 type AxisName = (typeof AXES)[number];
 
@@ -60,7 +56,7 @@ function WorkValue({
     return (
       <input
         autoFocus
-        className="w-full rounded-md border border-ring bg-transparent px-1 text-right text-3xl tabular-nums outline-none"
+        className="w-full rounded-md border border-ring bg-transparent px-1 text-right font-mono text-3xl tabular-nums outline-none"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onFocus={(e) => e.target.select()}
@@ -79,7 +75,7 @@ function WorkValue({
       disabled={!editable}
       title={editable ? `Click to set the work ${axis} coordinate` : undefined}
       className={cn(
-        "rounded-md px-1 text-right text-3xl tabular-nums",
+        "rounded-md px-1 text-right font-mono text-3xl tabular-nums",
         editable && "cursor-text hover:bg-muted",
         className,
       )}
@@ -97,6 +93,8 @@ export function Dro() {
   const t = useStore((s) => s.telemetry);
   const live = t?.live ?? true;
   const editable = connected && status?.state === "idle" && !job;
+  const busy = useStore((s) => s.state?.toolChange != null || s.state?.probe?.running != null);
+  const [picking, setPicking] = useState(false);
 
   return (
     <Card size="sm">
@@ -109,7 +107,7 @@ export function Dro() {
         )}
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid grid-cols-[auto_1fr_auto] items-baseline gap-x-3 gap-y-1 font-mono">
+        <div className="grid grid-cols-[auto_1fr_auto] items-baseline gap-x-3 gap-y-1">
           <span />
           <span className="text-right text-xs text-muted-foreground">work</span>
           <span className="text-right text-xs text-muted-foreground">machine</span>
@@ -122,7 +120,7 @@ export function Dro() {
                 editable={editable}
                 className={cn(!connected && "text-muted-foreground", !live && "text-amber-500")}
               />
-              <span className="text-right text-sm tabular-nums text-muted-foreground">
+              <span className="text-right font-mono text-sm tabular-nums text-muted-foreground select-text">
                 {connected ? fmt(t?.machine[i]) : "—"}
               </span>
             </div>
@@ -152,31 +150,62 @@ export function Dro() {
         )}
 
         {status && (
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-            <dt className="text-muted-foreground">Tool</dt>
-            <dd className="text-right font-mono">
+          <button
+            type="button"
+            disabled={!editable || busy}
+            title={editable && !busy ? "Change the tool" : undefined}
+            className="group flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-1.5 text-left enabled:cursor-pointer enabled:hover:bg-muted disabled:opacity-60"
+            onClick={() => setPicking(true)}
+          >
+            <Wrench className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate text-base font-semibold">
               {status.tool ? (
                 <>
                   {toolName(status.tool.number)}
                   {status.tool.target != null && <> → {toolName(status.tool.target)}</>}
                 </>
               ) : (
-                "—"
+                "No tool"
               )}
-            </dd>
+            </span>
+            {status.tool && status.tool.number >= 0 && (
+              <span className="text-sm tabular-nums text-muted-foreground" title="Tool length offset, relative to the tool Z was zeroed with">
+                {status.tool.offset >= 0 && "+"}
+                {status.tool.offset.toFixed(3)}
+              </span>
+            )}
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground group-disabled:hidden" />
+          </button>
+        )}
+        <ToolPicker open={picking} onOpenChange={setPicking} />
+
+        {status && (
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm tabular-nums">
             <dt className="text-muted-foreground">Feed</dt>
-            <dd className="text-right font-mono">
+            <dd className="text-right">
               {fmt(t?.feed, 0)} / {fmt(status.feedRequested ?? undefined, 0)}
             </dd>
-            <dt className="text-muted-foreground">Spindle</dt>
-            <dd className="text-right font-mono">
-              {fmt(t?.spindleRpm, 0)} rpm
-              {t?.spindleTemp != null && <> · {t.spindleTemp.toFixed(0)}°C</>}
-            </dd>
+            {status.laser?.mode ? (
+              <>
+                <dt className="text-muted-foreground">Laser</dt>
+                <dd className="text-right">
+                  {fmt(t?.laserPower ?? undefined, 0)} %
+                  {status.laser.testing ? " · test fire" : status.laser.on ? " · on" : ""}
+                </dd>
+              </>
+            ) : (
+              <>
+                <dt className="text-muted-foreground">Spindle</dt>
+                <dd className="text-right">
+                  {fmt(t?.spindleRpm, 0)} rpm
+                  {t?.spindleTemp != null && <> · {t.spindleTemp.toFixed(0)}°C</>}
+                </dd>
+              </>
+            )}
             {status.job && (
               <>
                 <dt className="text-muted-foreground">Job</dt>
-                <dd className="text-right font-mono">
+                <dd className="text-right">
                   {status.job.percent}% · line {status.job.lines}
                 </dd>
               </>

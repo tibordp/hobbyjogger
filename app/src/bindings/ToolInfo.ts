@@ -2,7 +2,7 @@
 
 export type ToolInfo = { 
 /**
- * -1 = none; 9999 = wired 3D probe.
+ * -1 = none; 0 = depth probe; 8888 = laser; 9999 = wired 3D probe.
  */
 number: number, 
 /**

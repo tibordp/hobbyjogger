@@ -2,6 +2,7 @@ import { Cable, Cpu, Plug, Unplug, Wifi } from "lucide-react";
 import { useState } from "react";
 
 import type { ConnectTarget } from "@/bindings/ConnectTarget";
+import type { DiscoveredMachine } from "@/bindings/DiscoveredMachine";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,10 +28,13 @@ function parseHost(text: string): ConnectTarget | null {
   return { kind: "tcp", host, port: p };
 }
 
+/** A stable empty list: a selector returning a fresh `[]` would re-render forever. */
+const NONE: DiscoveredMachine[] = [];
+
 export function ConnectionBar() {
   const connection = useStore((s) => s.state?.connection);
   const machine = useStore((s) => s.state?.machine);
-  const discovered = useStore((s) => s.state?.discovered ?? []);
+  const discovered = useStore((s) => s.state?.discovered ?? NONE);
   const [choice, setChoice] = useState<string>("");
   const [host, setHost] = useState("");
 

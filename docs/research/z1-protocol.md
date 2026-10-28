@@ -189,9 +189,28 @@ Z1 `Makera_Z1_010967`, firmware `version = 1.1.2.0.1.13`, macOS host, using `hj`
   `FILE_END`). A 3.6 KB file took 0.27 s over WiFi.
 - **`md5sum <file>` returns the real digest** on 1.1.2 (not the placeholder), formatted
   `<digest><path>` with no separator.
-- **`ls -s <dir>` replies in `LOAD_INFO` (0x83) frames**, one entry per frame: `name size YYYYMMDDhhmmss`.
-  Directories end in `/`. New files are dated 1980-01-01 (clock not set; there is a `time <unix>`
-  command).
+- **`ls -s <dir>` replies in `LOAD_INFO` (0x83) frames** holding CRLF-separated entries,
+  `name size YYYYMMDDhhmmss` (several per frame; files have two spaces before the size,
+  directories one and a trailing `/`), then **`LOAD_FINISH` (0x84) `Load directory finished.`**
+  Spaces in names come back escaped as `\x01`, like uploads send them. A directory that doesn't
+  exist lists as empty (just the finish). New files are dated 1980-01-01 (clock not set; there is a
+  `time <unix>` command). Capture: [captures/z1-sd-listing.jsonl](captures/z1-sd-listing.jsonl)
+  (2026-10-27, 1.1.3).
+- **`rm <path>`** (escaped like uploads) replies `LOAD_FINISH` `ok` on success and **`LOAD_ERROR`
+  (0x85) `Could not delete <path>`** on failure.
+- **`download <path>`** (in `FILE_START`, escaped like uploads) works as the mirror of upload,
+  driven by the host: machine → `FILE_MD5` (the real digest), host → `FILE_VIEW`, machine →
+  `FILE_VIEW` `u32 blocks, u16 block_size` (8192 over WiFi), then host → `FILE_DATA seq` /
+  machine → `FILE_DATA seq + block`, and host → `FILE_END` after the last block. The machine then
+  answers `FILE_END ok` and `Info: download success: <path>.` Answering the `FILE_MD5` with
+  `FILE_CANCEL` skips the transfer (the machine echoes `Info: canceled by remote!`). A missing
+  file is cancelled at once: `Error: failed to open file [<path>]!`. **The file stays open until
+  the machine's closing reply**: an `rm` sent right after our `FILE_END`/`FILE_CANCEL` failed with
+  `Could not delete`. On the Z1 the ESP32 does all this; the motion firmware's
+  `Player::upload_command`/`download_command` are empty. Capture:
+  [captures/z1-download.jsonl](captures/z1-download.jsonl) (2026-10-27, WiFi; USB not tried yet).
+- Status polling (`?` every 250 ms) alongside an upload is fine: a 33 KB upload in 8 KiB blocks
+  went through with polling running (Hobby Jogger's `hardware` test).
 - **`play <file>`** → `  File size N`. Status gets `P:lines,percent,secs`. The job's `G4 S2` plus
   M3 spin-up took ~10 s before motion started.
 - **`suspend` waits for the planner queue to drain** (~3.2 s with 1 mm segments at 600 mm/min), in

@@ -158,3 +158,30 @@ the same way (rod radius instead), can't probe non-conductive parts, and needs i
   clear the halt and restore modal state (`G90`), since the program stops mid-way in `G91`.
 - The 3D probe is tool T9999 on this machine (selected via Makera Studio's probe switch).
 - Ball radius is still nominal (2 mm ball); a calibration routine should measure it.
+
+## In the app (2026-10-27)
+
+Hobby Jogger's probing routines (surface, edge, corner, bore, boss; `crates/hj-core/src/probe.rs`)
+use only probe moves: `G38.3` for searches and positioning (checking the `[PRB:…:flag]`), `G38.5`
+for releases. Developed against the simulator, which models a block with a bore and a boss.
+
+On the Z1 (1.1.3, 2026-10-27): **`G38.3` reports `[PRB:…:0]` then `ok` when it ends without
+contact, and `[PRB:…:1]` then `ok` when it stops on one** (e.g. an edge routine coming down onto
+the top because the edge was further than its reach). After a contact the probe's LED stays green
+for a few seconds even once it's clear; neither `$X` nor switching the probe off and on
+(`M494.2`/`M494.1`, which is all `M494` does on manual-change machines) changes that, and it
+clears by itself. Routines now back out to where the failing move started.
+
+The firmware also has a **motion probe guard** (`ZProbe::read_probe`): with T9999 (or T0) active,
+if the probe reads triggered during a non-probe move in X/Y or up in Z, it stops the motors and
+sets a halt.
+
+## Depth probe, T0 (firmware source, not yet verified on the Z1)
+
+The firmware treats T0 as a probe alongside T9999: a manual change to it runs the probe
+calibration (`fill_cali_scripts(is_probe)`, slow touch with `G38.6 … P1`), the motion probe guard
+covers it, and both read the same probe input. Unlike T9999, the change ends with `M494.2`
+(detector switch off), and the firmware's own Z probing (`M495 … O`, `fill_zprobe_scripts`) wraps
+its `G38.2` touches in `M494.1` / `M494.2`. It's a mechanical switch that only touches down, so
+the app offers Surface with it and switches it on the same way. To check on the machine: that the
+depth probe really is T0, and that it triggers with `M494.1` sent (and not without).

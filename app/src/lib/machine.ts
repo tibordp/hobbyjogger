@@ -20,6 +20,33 @@ export const STATE_LABEL: Record<MachineState, string> = {
   unknown: "Unknown",
 };
 
+/** The 3D probe's tool number on the Z1. */
+export const PROBE_TOOL = 9999;
+/** The depth probe's: it only touches down, so it measures Z only. */
+export const DEPTH_PROBE_TOOL = 0;
+/** The laser module's: laser mode changes to it. */
+export const LASER_TOOL = 8888;
+
+export function toolName(n: number) {
+  if (n === PROBE_TOOL) return "3D probe";
+  if (n === DEPTH_PROBE_TOOL) return "Depth probe";
+  if (n === LASER_TOOL) return "Laser";
+  if (n < 0) return "none";
+  return `T${n}`;
+}
+
+/** The tool as it reads mid-sentence: "the 3D probe", "T3". */
+export function theTool(n: number) {
+  if (n === PROBE_TOOL) return "the 3D probe";
+  if (n === DEPTH_PROBE_TOOL) return "the depth probe";
+  if (n === LASER_TOOL) return "the laser module";
+  return toolName(n);
+}
+
+export function isProbe(n: number | null | undefined) {
+  return n === PROBE_TOOL || n === DEPTH_PROBE_TOOL;
+}
+
 /** Mirrors the core's gating so controls can be disabled; the core remains the authority. */
 export function canJog(state: MachineState | null, job: boolean) {
   return !job && (state === "idle" || state === "run");
