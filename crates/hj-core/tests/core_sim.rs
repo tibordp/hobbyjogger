@@ -68,7 +68,11 @@ impl Sink for TestSink {
 }
 
 async fn until<F: Fn(&Mirror) -> bool>(sink: &TestSink, what: &str, f: F) {
-    for _ in 0..600 {
+    until_for(sink, what, 30, f).await
+}
+
+async fn until_for<F: Fn(&Mirror) -> bool>(sink: &TestSink, what: &str, secs: u64, f: F) {
+    for _ in 0..secs * 20 {
         if f(&sink.0.lock().unwrap()) {
             return;
         }
@@ -1275,6 +1279,8 @@ async fn maps_the_simulated_plate() {
         rows: 4,
         depth: 15.0,
         precise: false,
+        levels: 0,
+        tolerance: 0.0,
     };
     let map = |m: &Mirror| m.state.as_ref().unwrap()["probe"]["map"].clone();
     let running = |m: &Mirror| !m.state.as_ref().unwrap()["probe"]["running"].is_null();
@@ -1283,7 +1289,7 @@ async fn maps_the_simulated_plate() {
         .unwrap();
     // Pause partway, then carry on.
     until(&sink, "a few points", |m| {
-        map(m)["done"].as_u64().unwrap() >= 4
+        map(m)["probed"].as_array().unwrap().len() >= 4
     })
     .await;
     core.request(Request::PauseMap).await.unwrap();
@@ -1293,10 +1299,20 @@ async fn maps_the_simulated_plate() {
     .await;
     let paused = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
     assert!(paused["error"].is_null(), "{paused}");
-    let done = paused["map"]["done"].as_u64().unwrap();
+    let done = paused["map"]["probed"].as_array().unwrap().len();
     assert!((4..20).contains(&done), "{paused}");
     core.request(Request::ResumeMap).await.unwrap();
-    until(&sink, "map done", |m| !running(m) && map(m)["done"] == 20).await;
+    until(&sink, "map done", |m| {
+        !running(m) && map(m)["complete"] == true
+    })
+    .await;
+    assert_eq!(
+        sink.0.lock().unwrap().state.as_ref().unwrap()["probe"]["map"]["probed"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
     let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
     assert!(probe["error"].is_null(), "{probe}");
 
@@ -1370,11 +1386,16 @@ async fn maps_the_simulated_plate() {
             rows: 3,
             depth: 25.0,
             precise: false,
+            levels: 0,
+            tolerance: 0.0,
         },
     })
     .await
     .unwrap();
-    until(&sink, "hole mapped", |m| !running(m) && map(m)["done"] == 9).await;
+    until(&sink, "hole mapped", |m| {
+        !running(m) && map(m)["complete"] == true
+    })
+    .await;
     let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
     assert!(probe["error"].is_null(), "{probe}");
     assert_eq!(probe["map"]["unreached"], serde_json::json!([4]), "{probe}");
@@ -1434,4 +1455,110 @@ async fn maps_the_simulated_plate() {
     .await;
     let s = sink.0.lock().unwrap().state.as_ref().unwrap()["status"]["tool"].clone();
     assert_eq!(s["number"], 9999, "{s}");
+}
+
+#[tokio::test]
+async fn maps_the_dome_adaptively() {
+    use hj_core::map::MapSpec;
+    use hj_sim::{BALL_RADIUS, DOME_CENTER, DOME_RADIUS, PLATE_SLOPE, plate_top};
+
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    core.request(Request::Mdi {
+        line: "M493.2 T9999".into(),
+    })
+    .await
+    .unwrap();
+    core.request(Request::SetProbeSettings {
+        settings: hj_core::probe::ProbeSettings {
+            fast_feed: 1200.0,
+            slow_feed: 300.0,
+            travel_feed: 2400.0,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    core.request(Request::Mdi {
+        line: "G53 G0 X-80 Y-145 Z-62".into(),
+    })
+    .await
+    .unwrap();
+    until(&sink, "above the plate", |m| {
+        state_of(m) == Some("idle")
+            && m.telemetry
+                .as_ref()
+                .is_some_and(|t| (t.machine[2] + 62.0).abs() < 1e-6)
+    })
+    .await;
+
+    // A 20 mm grid over the dome, refined twice (down to 5 mm) where the surface bends: the
+    // plate is a plane, so only the dome's cells get finer.
+    let spec = MapSpec {
+        min: [-80.0, -150.0],
+        max: [-40.0, -110.0],
+        columns: 3,
+        rows: 3,
+        depth: 15.0,
+        precise: false,
+        levels: 2,
+        tolerance: 0.05,
+    };
+    core.request(Request::MapSurface { spec: spec.clone() })
+        .await
+        .unwrap();
+    let done = |m: &Mirror| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["running"].is_null() && (p["map"]["complete"] == true || !p["error"].is_null())
+    };
+    until_for(&sink, "map complete", 120, done).await;
+    let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(probe["error"].is_null(), "{probe}");
+
+    let (cols, rows) = spec.lattice();
+    let probed: Vec<usize> = probe["map"]["probed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    // More than the grid, fewer than the whole lattice.
+    assert!(
+        probed.len() > 9 && probed.len() < cols * rows,
+        "{} of {}",
+        probed.len(),
+        cols * rows
+    );
+    // Each probed point is where a ball dropped straight down first touches.
+    let r = BALL_RADIUS;
+    for &i in &probed {
+        let [x, y] = spec.at(i);
+        let plate = plate_top(x) + r * PLATE_SLOPE.hypot(1.0) - r;
+        let d = (x - DOME_CENTER[0]).hypot(y - DOME_CENTER[1]);
+        let dome = if d < DOME_RADIUS + r {
+            DOME_CENTER[2] + ((DOME_RADIUS + r).powi(2) - d * d).sqrt() - r
+        } else {
+            f64::NEG_INFINITY
+        };
+        let got = probe["map"]["z"][i].as_f64().unwrap();
+        assert!((got - plate.max(dome)).abs() < 0.002, "X{x} Y{y}: {got}");
+    }
+    // The finest points are all near the dome.
+    for &i in &probed {
+        let (c, rr) = (i % cols, i / cols);
+        if c % 2 == 1 || rr % 2 == 1 {
+            let [x, y] = spec.at(i);
+            let d = (x - DOME_CENTER[0]).hypot(y - DOME_CENTER[1]);
+            assert!(
+                d < DOME_RADIUS + 15.0,
+                "fine point far from the dome at X{x} Y{y}"
+            );
+        }
+    }
 }

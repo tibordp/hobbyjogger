@@ -10,19 +10,28 @@ export type SurfaceMap = { spec: MapSpec,
  */
 top: number, 
 /**
- * Tool tip Z per grid point, row by row from the front (−Y), each from left (−X). `None`
- * where nothing was found within the depth, or not probed yet.
+ * Tool tip Z per lattice point ([`MapSpec::lattice`]), row by row from the front (−Y), each
+ * from left (−X). `None` where nothing was found within the depth, or not probed.
  */
 z: Array<number | null>, 
 /**
- * How many points are done, in probing order ([`order`]).
+ * The lattice points probed, in the order they were.
  */
-done: number, 
+probed: Array<number>, 
 /**
- * Grid points without contact because they were out of the stylus' reach: deeper below
+ * Points planned and not probed yet: the rest of the grid, or of the batch of refinement
+ * in progress (more may follow it).
+ */
+pending: number, 
+/**
+ * Lattice points without contact because they were out of the stylus' reach: deeper below
  * the surface around than the probe body allows (see [`scan`]).
  */
 unreached: Array<number>, 
+/**
+ * Nothing more to probe.
+ */
+complete: boolean, 
 /**
  * Time spent probing, s, for an estimate of the rest.
  */

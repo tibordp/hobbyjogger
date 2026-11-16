@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { useConnected, useJobRunning } from "@/lib/machine";
 import { useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
-import { heat, pointsRange, surfacePoints, zRange, type Vec3 as MapPoint } from "@/lib/surfaceMap";
+import { cellRims, heat, pointsRange, probedMask, surfacePoints, zRange, type Vec3 as MapPoint } from "@/lib/surfaceMap";
 import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -471,8 +471,8 @@ function setup(el: HTMLDivElement) {
       }
       render();
     },
-    /** A surface map's points (`surface` from [`surfacePoints`]), coloured low to high, joined to
-     * their measured neighbours. */
+    /** A surface map's points (from `surfacePoints`), coloured low to high, joined round the cells
+     * they make. */
     setSurface(map: SurfaceMap | null, points: (MapPoint | null)[]) {
       clear(surface);
       const range = map && pointsRange(points);
@@ -488,17 +488,21 @@ function setup(el: HTMLDivElement) {
         const col: number[] = [];
         const wire: number[] = [];
         const wireCol: number[] = [];
-        map.z.forEach((z, i) => {
-          if (z === null) return;
+        points.forEach((p, i) => {
+          if (!p) return;
           pos.push(...at(i));
           col.push(...colour(i));
-          const c = i % spec.columns;
-          for (const j of [c + 1 < spec.columns ? i + 1 : -1, i + spec.columns]) {
-            if (j < 0 || j >= map.z.length || map.z[j] === null) continue;
+        });
+        // Each cell's edge, through the points on it (a refined neighbour's too); each edge is
+        // drawn from both sides, which doesn't show.
+        for (const rim of cellRims(spec, probedMask(map))) {
+          for (let k = 0; k < rim.length; k++) {
+            const [i, j] = [rim[k], rim[(k + 1) % rim.length]];
+            if (!points[i] || !points[j]) continue;
             wire.push(...at(i), ...at(j));
             wireCol.push(...colour(i), ...colour(j));
           }
-        });
+        }
         const dots = new THREE.BufferGeometry();
         dots.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
         dots.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));

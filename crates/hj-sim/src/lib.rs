@@ -85,6 +85,9 @@ pub const BORE_DEPTH: f64 = 10.0;
 pub const BOSS_CENTER: [f64; 2] = [-112.0, -130.0];
 pub const BOSS_DIAMETER: f64 = 12.0;
 pub const BOSS_HEIGHT: f64 = 5.0;
+/// How far from where the probe let go its contact chatters, mm.
+const CHATTER: f64 = 0.1;
+
 /// The simulated probe's ball radius.
 pub const BALL_RADIUS: f64 = 1.0;
 
@@ -199,6 +202,9 @@ struct Machine {
     /// Where the head was when the tool change started; it returns there afterwards.
     atc_return: [f64; 2],
     probe_report: Option<ProbeReport>,
+    /// Where the probe last let go: within [`CHATTER`] of it, it flickers, and a probe move
+    /// toward anything stops at once (the firmware doesn't debounce it).
+    released_at: Option<[f64; 3]>,
     /// Feed and spindle overrides, %.
     feed_override: f64,
     spindle_override: f64,
@@ -252,6 +258,7 @@ impl Default for Machine {
             atc: None,
             atc_return: [0.0; 2],
             probe_report: None,
+            released_at: None,
             feed_override: 100.0,
             spindle_override: 100.0,
             laser_mode: false,
@@ -436,9 +443,16 @@ impl Machine {
     /// or releases (4, 5) the simulated part.
     fn probe_move(&mut self, code: i64, delta: [Option<f64>; 5], out: &mut Vec<String>) {
         let start = self.planned();
+        let toward = code == 382 || code == 383;
+        // As the firmware: toward needs the probe free and away needs it triggered, or it's a
+        // halt (with a message that says "triggered" either way).
+        if touches_part([start[0], start[1], start[2]]) == toward {
+            out.push("Error:ZProbe triggered before move, aborting command.\n".into());
+            self.halt_with(3);
+            return;
+        }
         let d: Vec<f64> = (0..3).map(|i| delta[i].unwrap_or(0.0)).collect();
         let len = d.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let toward = code == 382 || code == 383;
         let at = |t: f64| {
             [
                 start[0] + d[0] * t,
@@ -466,7 +480,20 @@ impl Machine {
                 }
                 hi
             });
+        // A flicker right where it let go stops a move toward at once.
+        let chatter = toward
+            && self.released_at.is_some_and(|r| {
+                (0..3)
+                    .map(|i| (r[i] - start[i]).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+                    < CHATTER
+            });
+        let stop = if chatter { Some(0.0) } else { stop };
         let end = at(stop.unwrap_or(1.0));
+        if !toward && stop.is_some() {
+            self.released_at = Some(end);
+        }
         let mut target = start;
         target[..3].copy_from_slice(&end);
         self.queue(target, (self.feed / 60.0).max(0.1), out);
@@ -755,6 +782,14 @@ impl Machine {
             }
             Some(4902) => self.confirm_tool_change(out),
             Some(4910) => self.remeasure_tool(out),
+            // The probe's state, as the firmware appends it to the endstops'.
+            Some(1190) => {
+                let p = self.planned();
+                out.push(format!(
+                    "Probe: {}\n",
+                    u8::from(touches_part([p[0], p[1], p[2]]))
+                ));
+            }
             Some(2200) => self.feed_override = s_word.unwrap_or(100.0).clamp(10.0, 1000.0),
             Some(2230) => self.spindle_override = s_word.unwrap_or(100.0).clamp(50.0, 200.0),
             Some(3250) => self.laser_scale = s_word.unwrap_or(100.0),

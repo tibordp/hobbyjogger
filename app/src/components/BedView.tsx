@@ -23,7 +23,7 @@ import { act } from "@/lib/actions";
 import { canJog, isProbe, useConnected, useJobRunning, useMachineState, useStatus, useWorkOffset } from "@/lib/machine";
 import { fitProblems, useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
-import { heatCss, isDone, nearestPoint, plannedSpec, pointAt, pointsRange, surfacePoints, type Vec3 as MapPoint } from "@/lib/surfaceMap";
+import { heatCss, lattice, nearestPoint, onGrid, plannedSpec, pointAt, pointsRange, probedMask, scaleOf, surfacePoints, type Vec3 as MapPoint } from "@/lib/surfaceMap";
 import { setMapView, setProbeForm, useUi, type ProbeForm } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -128,32 +128,47 @@ function PlannedMap({ spec, dots, sx, sy, k }: { spec: MapSpec; dots: boolean; s
 
 /** A measured (or partly measured) map: `points` (the surface, compensated or not) coloured from
  * low to high; misses as grey rings, points out of the stylus' reach as amber ones. */
-function MeasuredMap({ map, points, sx, sy, k }: { map: SurfaceMap; points: (MapPoint | null)[]; sx: ToSvg; sy: ToSvg; k: number }) {
+function MeasuredMap({
+  map,
+  probed,
+  points,
+  sx,
+  sy,
+  k,
+}: {
+  map: SurfaceMap;
+  probed: boolean[];
+  points: (MapPoint | null)[];
+  sx: ToSvg;
+  sy: ToSvg;
+  k: number;
+}) {
   const { spec } = map;
   const range = pointsRange(points);
   const span = range ? range[1] - range[0] : 0;
   const unreached = new Set(map.unreached);
-  return (
-    <g className="pointer-events-none">
-      {map.z.map((_, i) => {
-        const p = points[i];
-        if (p && range) {
-          const t = span > 0 ? (p[2] - range[0]) / span : 0.5;
-          return <circle key={i} cx={sx(p[0])} cy={sy(p[1])} r={2.5 * k} style={{ fill: heatCss(t) }} />;
-        }
-        const [x, y] = pointAt(spec, i);
-        const done = isDone(map, i);
-        if (unreached.has(i)) {
-          return <circle key={i} cx={sx(x)} cy={sy(y)} r={2.5 * k} fill="none" className="stroke-amber-500" strokeWidth={k} />;
-        }
-        return done ? (
-          <circle key={i} cx={sx(x)} cy={sy(y)} r={2 * k} fill="none" className="stroke-muted-foreground" strokeWidth={0.75 * k} />
-        ) : (
-          <circle key={i} cx={sx(x)} cy={sy(y)} r={k} className="fill-muted-foreground/40" />
-        );
-      })}
-    </g>
-  );
+  const out = [];
+  // The probed points, and the grid's still to come (refinement's aren't known yet).
+  for (let i = 0; i < map.z.length; i++) {
+    const p = points[i];
+    if (p && range) {
+      const t = span > 0 ? (p[2] - range[0]) / span : 0.5;
+      out.push(<circle key={i} cx={sx(p[0])} cy={sy(p[1])} r={2.5 * k} style={{ fill: heatCss(t) }} />);
+      continue;
+    }
+    if (!probed[i] && !onGrid(spec, i)) continue;
+    const [x, y] = pointAt(spec, i);
+    out.push(
+      unreached.has(i) ? (
+        <circle key={i} cx={sx(x)} cy={sy(y)} r={2.5 * k} fill="none" className="stroke-amber-500" strokeWidth={k} />
+      ) : probed[i] ? (
+        <circle key={i} cx={sx(x)} cy={sy(y)} r={2 * k} fill="none" className="stroke-muted-foreground" strokeWidth={0.75 * k} />
+      ) : (
+        <circle key={i} cx={sx(x)} cy={sy(y)} r={k} className="fill-muted-foreground/40" />
+      ),
+    );
+  }
+  return <g className="pointer-events-none">{out}</g>;
 }
 
 const OUTWARD: Record<Side, [number, number]> = { left: [-1, 0], right: [1, 0], front: [0, -1], back: [0, 1] };
@@ -488,17 +503,18 @@ export function BedView() {
   const compensate = useUi((s) => s.mapCompensate);
   const ball = probe?.settings.ballDiameter ?? 0;
   const mapPoints = useMemo(() => (surfaceMap ? surfacePoints(surfaceMap, ball / 2, compensate) : []), [surfaceMap, ball, compensate]);
+  const mapProbed = useMemo(() => (surfaceMap ? probedMask(surfaceMap) : []), [surfaceMap]);
   const measured = useMemo(
-    () => surfaceMap && <MeasuredMap map={surfaceMap} points={mapPoints} sx={(x) => x - minX} sy={(y) => maxY - y} k={k} />,
-    [surfaceMap, mapPoints, minX, maxY, k],
+    () =>
+      surfaceMap && <MeasuredMap map={surfaceMap} probed={mapProbed} points={mapPoints} sx={(x) => x - minX} sy={(y) => maxY - y} k={k} />,
+    [surfaceMap, mapProbed, mapPoints, minX, maxY, k],
   );
   // The map point under the pointer (within a few pixels), once probed: highlighted, with its
   // coordinates, and a click on it opens its own menu.
   const hoverPoint = useMemo(() => {
     if (!surfaceMap || !hover || drag) return null;
-    const i = nearestPoint(surfaceMap.spec, mapPoints, hover.x, hover.y, 8 * k);
-    return i !== null && isDone(surfaceMap, i) ? i : null;
-  }, [surfaceMap, mapPoints, hover, drag, k]);
+    return nearestPoint(surfaceMap, mapProbed, mapPoints, hover.x, hover.y, 8 * k);
+  }, [surfaceMap, mapProbed, mapPoints, hover, drag, k]);
   /** A map point's machine position: the surface point, or the grid point where there's none. */
   const pointPos = (i: number): [number, number, number | null] => {
     const p = mapPoints[i];
@@ -507,11 +523,16 @@ export function BedView() {
     return [x, y, null];
   };
   const workOffset = useWorkOffset();
-  /** "Point 3, 5" (column, row from the front left), and what became of it if there's no surface. */
+  /** "Point 3, 5" (grid column, row from the front left), and what became of it if there's no
+   * surface. */
   const pointLabel = (i: number) => {
     const m = surfaceMap!;
     const what = mapPoints[i] ? "" : m.unreached.includes(i) ? " · out of the stylus' reach" : " · no contact";
-    return `Point ${(i % m.spec.columns) + 1}, ${Math.floor(i / m.spec.columns) + 1}${what}`;
+    // In grid units: refined points fall between grid points.
+    const [cols] = lattice(m.spec);
+    const s = scaleOf(m.spec);
+    const g = (v: number) => String(+(v / s + 1).toFixed(3));
+    return `Point ${g(i % cols)}, ${g(Math.floor(i / cols))}${what}`;
   };
   const [pointMenu, setPointMenu] = useState<{ i: number; left: number; top: number } | null>(null);
   const problems =
@@ -729,7 +750,7 @@ export function BedView() {
               const [x, y] = pointPos(hoverPoint);
               return <circle cx={sx(x)} cy={sy(y)} r={6 * k} fill="none" className="pointer-events-none stroke-sky-300" strokeWidth={1.5 * k} />;
             })()}
-            {plan && !drag?.moved && <PlannedMap spec={plan} dots={!surfaceMap?.done} sx={sx} sy={sy} k={k} />}
+            {plan && !drag?.moved && <PlannedMap spec={plan} dots={!surfaceMap?.probed.length} sx={sx} sy={sy} k={k} />}
             {drag?.moved && (
               <rect
                 x={sx(Math.min(drag.from.x, drag.to.x))}

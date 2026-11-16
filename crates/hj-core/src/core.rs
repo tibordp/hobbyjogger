@@ -1564,20 +1564,25 @@ impl Actor {
                 SurfaceMap::new(spec, z)
             }
             None => match &self.state.probe.map {
-                Some(m) if m.done < m.total() => m.clone(),
+                Some(m) if !m.complete => m.clone(),
                 Some(_) => return Err(CoreError::Rejected("the map is complete".into())),
                 None => return Err(CoreError::Rejected("no map to carry on with".into())),
             },
         };
         let io = self.routine_io();
-        let resuming = map.done > 0;
+        let resuming = !map.probed.is_empty();
         self.note(
             ConsoleKind::Info,
             format!(
-                "{} surface map: {} × {} points",
+                "{} surface map: {} × {} points{}",
                 if resuming { "resuming" } else { "starting" },
                 map.spec.columns,
-                map.spec.rows
+                map.spec.rows,
+                if map.spec.levels > 0 {
+                    format!(", refined up to {} times", map.spec.levels)
+                } else {
+                    String::new()
+                }
             ),
         );
         self.state.probe.running = Some(RunningProbe {
@@ -1626,7 +1631,11 @@ impl Actor {
         if count == 0 {
             return Err(CoreError::Rejected("the map has no points yet".into()));
         }
-        std::fs::write(path, map::export(&m.spec, &points, format))
+        let mut probed = vec![false; m.z.len()];
+        for &i in &m.probed {
+            probed[i as usize] = true;
+        }
+        std::fs::write(path, map::export(&m.spec, &probed, &points, format))
             .map_err(|e| CoreError::Rejected(format!("couldn't write {path}: {e}")))?;
         self.note(
             ConsoleKind::Info,
@@ -1695,15 +1704,28 @@ impl Actor {
                     if limited {
                         m.unreached.push(index as u32);
                     }
-                    m.done += 1;
+                    m.probed.push(index as u32);
+                    m.pending = m.pending.saturating_sub(1);
                     m.secs += secs;
+                }
+            }
+            Update::MapPending(n) => {
+                if let Some(m) = &mut self.state.probe.map {
+                    m.pending = n;
                 }
             }
             Update::MapDone(result) => {
                 self.routine = None;
                 self.mapping = false;
                 self.state.probe.running = None;
-                let Some(m) = &self.state.probe.map else {
+                if let Some(m) = &mut self.state.probe.map
+                    && result == Ok(true)
+                {
+                    m.complete = true;
+                    m.pending = 0;
+                }
+                // A copy, to note about it below; once per scan.
+                let Some(m) = self.state.probe.map.clone() else {
                     return;
                 };
                 match result {
@@ -1712,7 +1734,7 @@ impl Actor {
                         let lo = zs.iter().copied().fold(f64::INFINITY, f64::min);
                         let hi = zs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                         let unreached = m.unreached.len();
-                        let missed = m.z.len() - zs.len() - unreached;
+                        let missed = m.probed.len() - zs.len() - unreached;
                         let range = if zs.is_empty() {
                             "nothing found".into()
                         } else {
@@ -1728,15 +1750,14 @@ impl Actor {
                         }
                         self.note(
                             ConsoleKind::Info,
-                            format!("surface map done: {} points, {range}{missed}", m.z.len()),
+                            format!(
+                                "surface map done: {} points, {range}{missed}",
+                                m.probed.len()
+                            ),
                         );
                     }
                     Ok(false) => {
-                        let text = format!(
-                            "surface map paused after {} of {} points",
-                            m.done,
-                            m.total()
-                        );
+                        let text = format!("surface map paused after {} points", m.probed.len());
                         self.note(ConsoleKind::Info, text);
                     }
                     Err(e) => {

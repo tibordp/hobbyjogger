@@ -186,6 +186,17 @@ clearance and carries on (never above the top). The depth probe can't feel sidew
 with it every crossing is at the top. Rows alternate direction. A point with no contact within the
 depth is recorded as missing and the scan goes on.
 
+With refinement (`levels` > 0) the map lives on a finer lattice, the grid's spacing halved that
+many times, of which only some points are probed: the grid first, then each cell's centre; where
+the centre is further than the tolerance from its corners' average, or the corners and centre
+don't all touch or all miss (an edge), the midpoints of its sides, then the same on its quarters.
+`map::plan` works out the next batch from what's been measured, so the scan is a loop of plan and
+probe, and resuming just plans again. The state keeps the points in the order they were probed,
+and how many the current batch has left (more batches may follow). Slopes for ball compensation
+come from a least-squares plane through the nearest points with contact (on a plain grid, central
+differences), and the STL fans each cell from its centre round the points on its edge, so finer
+neighbours leave no gaps.
+
 The probe body feels nothing, so with the 3D probe each point also has its own floor: no deeper
 than the stylus length (less 2 mm) below the highest point measured within the body's radius plus
 one grid step. A narrow hole deeper than that is recorded as out of reach instead of driving the

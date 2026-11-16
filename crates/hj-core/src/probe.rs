@@ -1,7 +1,8 @@
 //! Probing routines with the 3D probe, run as a task alongside the core actor.
 //!
 //! Every move is a `G38.x` probe move, so the probe stops on contact wherever it goes: searches
-//! (`G38.3`, "toward, no error") check the contact flag themselves, releases are `G38.5`, and
+//! (`G38.3`, "toward, no error") check the contact flag themselves, releases are `G38.5` (then a
+//! short plain move further back, see [`Io::let_go`]), and
 //! positioning moves are `G38.3` too, which turns an unexpected contact into an error instead of a
 //! broken stylus. On the Z1, `G38.x` distances are always relative, they block until the move is
 //! done, and report `[PRB:x,y,z:flag]` in machine coordinates before `ok` (see
@@ -9,7 +10,8 @@
 //! in X/Y.
 //!
 //! Touches are two-pass, as in the user's own routines: a fast touch, back off until the probe
-//! releases, 1 mm clearance, then a slow touch, which is the one measured.
+//! releases (and a little more, see [`Io::let_go`]), to 1 mm clearance in all, then a slow touch,
+//! which is the one measured.
 
 use std::time::Duration;
 
@@ -217,6 +219,8 @@ pub(crate) enum Update {
         limited: bool,
         secs: f64,
     },
+    /// A surface map planned this many points to probe next.
+    MapPending(u32),
     /// A surface map scan stopped: whether it finished (rather than paused), or why it failed.
     MapDone(std::result::Result<bool, String>),
 }
@@ -283,7 +287,6 @@ impl Io {
         Ok(hit)
     }
 
-    /// Move by `delta`, stopping (with an error) if the probe touches anything on the way.
     /// Send a plain command and wait for its `ok`.
     pub(crate) async fn command(&mut self, line: &str) -> Result<()> {
         self.updates
@@ -301,6 +304,72 @@ impl Io {
                 return Err(format!("the machine reported: {reply}"));
             }
         }
+    }
+
+    /// Whether the probe reads triggered now (`M119`, which ends its line with `Probe: 0|1`).
+    pub(crate) async fn triggered(&mut self) -> Result<bool> {
+        self.updates
+            .send(Update::Send("M119".into()))
+            .map_err(|_| "stopped".to_string())?;
+        let mut state = None;
+        loop {
+            let reply = tokio::time::timeout(Duration::from_secs(10), self.lines.recv())
+                .await
+                .map_err(|_| "no reply to M119".to_string())?
+                .ok_or("disconnected")?;
+            if let Some(v) = reply.split("Probe:").nth(1) {
+                state = Some(v.trim().starts_with('1'));
+            } else if reply == "ok" {
+                return state.ok_or_else(|| "M119 didn't say how the probe reads".into());
+            } else if reply.to_ascii_lowercase().starts_with("error") {
+                return Err(format!("the machine reported: {reply}"));
+            }
+        }
+    }
+
+    /// A plain relative move by `delta` (not a probe move: only for going back the way the probe
+    /// came, away from what it touched).
+    async fn nudge(&mut self, delta: [f64; 3]) -> Result<()> {
+        let words: Vec<String> = (0..3)
+            .filter(|&i| delta[i].abs() >= 1e-4)
+            .map(|i| format!("{}{:.4}", AXES[i], delta[i]))
+            .collect();
+        if words.is_empty() {
+            return Ok(());
+        }
+        let moved = self
+            .command(&format!(
+                "G91 G1 {} F{:.0}",
+                words.join(" "),
+                self.settings.fast_feed
+            ))
+            .await;
+        // Back to absolute whatever happened: everything else assumes it.
+        let restored = self.command("G90").await;
+        moved.and(restored)?;
+        for (here, d) in self.here.iter_mut().zip(delta) {
+            *here += d;
+        }
+        Ok(())
+    }
+
+    /// Back the probe off along `delta` until it lets go, then up to [`LET_GO`] mm (no more than
+    /// `extra`) further with a plain move. Returns false if it was still triggered after `delta`.
+    ///
+    /// Right where it lets go the contact chatters (the firmware doesn't debounce it), so a
+    /// guarded move from there can stop at once on a flicker; the plain move clears that. And
+    /// `G38.5` from a probe that has already let go is a halt, so it's only sent while the probe
+    /// reads triggered.
+    pub(crate) async fn let_go(&mut self, delta: [f64; 3], feed: f64, extra: f64) -> Result<bool> {
+        if self.triggered().await? && !self.probe_move("G38.5", delta, feed).await? {
+            return Ok(false);
+        }
+        let len = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
+        let step = LET_GO.min(extra);
+        if len > 1e-9 && step > 1e-4 {
+            self.nudge(delta.map(|d| d / len * step)).await?;
+        }
+        Ok(true)
     }
 
     /// Move by `delta`, stopping if the probe touches anything on the way. Then it backs out to
@@ -327,8 +396,9 @@ impl Io {
         );
         let back = |here: [f64; 3]| [from[0] - here[0], from[1] - here[1], from[2] - here[2]];
         // Release first (stops as soon as it does), then the rest of the way, still guarded.
+        let length = |d: [f64; 3]| d.iter().map(|v| v * v).sum::<f64>().sqrt();
         let released = self
-            .probe_move("G38.5", back(hit), self.settings.fast_feed)
+            .let_go(back(hit), self.settings.fast_feed, length(back(hit)))
             .await
             .unwrap_or(false);
         if !released {
@@ -373,7 +443,8 @@ impl Io {
             ));
         }
         self.release(axis, dir).await?;
-        self.travel(along(-dir)).await?;
+        // 1 mm back in all, counting what the release moved past letting go.
+        self.travel(along(-dir * (1.0 - LET_GO))).await?;
         if !self
             .probe_move("G38.3", along(dir * 3.0), s.slow_feed)
             .await?
@@ -383,15 +454,17 @@ impl Io {
         let contact = self.here[axis];
         let _ = self.updates.send(Update::Contact(self.here));
         self.release(axis, dir).await?;
-        self.travel(along(-dir)).await?;
+        // 1 mm back in all, counting what the release moved past letting go.
+        self.travel(along(-dir * (1.0 - LET_GO))).await?;
         Ok(contact)
     }
 
+    /// Back off a contact made moving along `axis` in direction `dir` (±1).
     pub(crate) async fn release(&mut self, axis: usize, dir: f64) -> Result<()> {
         let mut back = [0.0; 3];
         back[axis] = -dir * 2.0;
         if !self
-            .probe_move("G38.5", back, self.settings.fast_feed / 2.0)
+            .let_go(back, self.settings.fast_feed / 2.0, LET_GO)
             .await?
         {
             return Err("the probe didn't release; check it".into());
@@ -467,8 +540,12 @@ fn parse_prb(line: &str) -> Option<([f64; 3], bool)> {
 /// How far [`back_off`] goes looking for the probe to release, mm.
 pub const BACK_OFF: f64 = 5.0;
 
-/// Recover after a routine went wrong: clear the halt if `unlock`, then move along `dir` until the
-/// probe releases (a probe move, so it stops as soon as it does; fine if it wasn't in contact).
+/// How far past where the probe lets go [`Io::let_go`] moves, clear of the chatter there, mm.
+pub const LET_GO: f64 = 0.5;
+
+/// Recover after a routine went wrong: clear the halt if `unlock`, then, if the probe still reads
+/// triggered, move along `dir` until it releases (and a little more). If it has already let go,
+/// that's all.
 pub(crate) async fn back_off(unlock: bool, dir: [f64; 3], mut io: Io) {
     let feed = io.settings.fast_feed / 2.0;
     let mut result = Ok(());
@@ -476,10 +553,13 @@ pub(crate) async fn back_off(unlock: bool, dir: [f64; 3], mut io: Io) {
         result = io.command("$X").await;
     }
     if result.is_ok() {
-        result = io
-            .probe_move("G38.5", dir.map(|d| d * BACK_OFF), feed)
-            .await
-            .map(|_| ());
+        result = match io.let_go(dir.map(|d| d * BACK_OFF), feed, LET_GO).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!(
+                "it still reads triggered after backing off {BACK_OFF} mm"
+            )),
+            Err(e) => Err(e),
+        };
     }
     let _ = io.updates.send(Update::Recovered(result));
 }

@@ -13,7 +13,7 @@ min: [number, number],
  */
 max: [number, number], 
 /**
- * Points along X and Y, at least 2 each.
+ * Grid points along X and Y, at least 2 each.
  */
 columns: number, rows: number, 
 /**
@@ -23,4 +23,13 @@ depth: number,
 /**
  * A searching touch, then a slow measuring one at each point, instead of one touch.
  */
-precise: boolean, };
+precise: boolean, 
+/**
+ * How many times the grid's spacing may be halved where the surface needs it; 0 for a plain
+ * grid.
+ */
+levels: number, 
+/**
+ * Refinement: how far a cell's centre may be from the average of its corners, mm.
+ */
+tolerance: number, };

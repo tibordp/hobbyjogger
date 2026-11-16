@@ -185,3 +185,16 @@ covers it, and both read the same probe input. Unlike T9999, the change ends wit
 its `G38.2` touches in `M494.1` / `M494.2`. It's a mechanical switch that only touches down, so
 the app offers Surface with it and switches it on the same way. To check on the machine: that the
 depth probe really is T0, and that it triggers with `M494.1` sent (and not without).
+
+## Probe state, chatter and `G38.4`/`G38.5` (firmware source, confirmed on the machine 2026-11)
+
+- `G38.x` checks the probe before moving (`ZProbe::probe_XYZ`): `G38.2`/`G38.3` need it free and
+  `G38.4`/`G38.5` need it triggered. Otherwise it prints `Error:ZProbe triggered before move,
+  aborting command.` (the same text either way, so misleading for `.4`/`.5`) and **halts**
+  (`PROBE_FAIL`).
+- The probe input isn't debounced by default (`zprobe.debounce_ms` 0). Right where the probe lets
+  go after `G38.5`, its contact chatters: a guarded `G38.3` lift started there stopped after 8 µm
+  as triggered. Hobby Jogger moves a further 0.5 mm with a plain move after every release, back
+  the way the probe came.
+- `M119` ends its line with `Probe: 0|1`: the probe's state now. Hobby Jogger reads it before each
+  `G38.5`, and Recover does nothing more when the probe has already let go.

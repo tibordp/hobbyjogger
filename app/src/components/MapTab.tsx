@@ -39,8 +39,8 @@ export function MapTab({ canStart }: { canStart: boolean }) {
 
   const start = async () => {
     if (!spec) return;
-    if (map && map.done > 0) {
-      const ok = await ask(`The current map's ${map.done} points are lost unless you've exported them.`, {
+    if (map && map.probed.length > 0) {
+      const ok = await ask(`The current map's ${map.probed.length} points are lost unless you've exported them.`, {
         title: "Start a new map?",
         kind: "warning",
         okLabel: "Start new map",
@@ -103,10 +103,56 @@ export function MapTab({ canStart }: { canStart: boolean }) {
         </ToggleGroup>
       </div>
 
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          spacing={0}
+          value={form.mapAdaptive ? "adaptive" : "grid"}
+          onValueChange={(v) => v && setProbeForm({ mapAdaptive: v === "adaptive" })}
+        >
+          <ToggleGroupItem value="grid" className="h-7 px-2 text-xs" title="Every point of the grid, nothing more">
+            Grid
+          </ToggleGroupItem>
+          <ToggleGroupItem
+            value="adaptive"
+            className="h-7 px-2 text-xs"
+            title="The grid, then finer where the surface bends or an edge runs through: each cell's centre is probed, and where it's off its corners' average by more than the tolerance, the cell is split in four, down to the finest spacing"
+          >
+            Adaptive
+          </ToggleGroupItem>
+        </ToggleGroup>
+        {form.mapAdaptive && (
+          <>
+            <Field
+              label="Halve"
+              unit="×"
+              value={form.mapLevels}
+              onChange={(v) => setProbeForm({ mapLevels: Math.min(Math.max(Math.round(v), 1), 6) })}
+              title="How many times the spacing may be halved where the surface needs it (1–6)"
+            />
+            <Field
+              label="Tolerance"
+              value={form.mapTolerance}
+              onChange={(mapTolerance) => setProbeForm({ mapTolerance })}
+              title="How far a cell's centre may be from what its corners predict before the cell is split"
+            />
+          </>
+        )}
+      </div>
+      {form.mapAdaptive && spec && (
+        <p className="-mt-1 text-xs text-muted-foreground">
+          Down to {((spec.max[0] - spec.min[0]) / (spec.columns - 1) / 2 ** spec.levels).toFixed(2)} mm where needed.
+        </p>
+      )}
+
       {!mapping && (
         <Button className="w-full" disabled={!canStart || !spec} onClick={() => void start()}>
           <Grid3x3 />
-          {spec ? `Map ${spec.columns} × ${spec.rows} = ${spec.columns * spec.rows} points` : "Pick an area to map"}
+          {spec
+            ? `Map ${spec.columns} × ${spec.rows} = ${spec.columns * spec.rows} points${spec.levels > 0 ? ", then refine" : ""}`
+            : "Pick an area to map"}
         </Button>
       )}
 
@@ -119,8 +165,11 @@ function MapResult({ map, mapping, canResume, offsetZ }: { map: SurfaceMap; mapp
   const [format, setFormat] = useState<ExportFormat>("csv");
   const compensate = useUi((s) => s.mapCompensate);
   const ball = useStore((s) => s.state?.probe?.settings.ballDiameter ?? 0);
-  const total = map.spec.columns * map.spec.rows;
-  const complete = map.done >= total;
+  const done = map.probed.length;
+  const complete = map.complete;
+  // Refinement plans in batches, so this is what's known so far.
+  const total = done + map.pending;
+  const adaptive = map.spec.levels > 0;
   // Of the surface as shown (and exported): compensated or not.
   const range = useMemo(() => pointsRange(surfacePoints(map, ball / 2, compensate)), [map, ball, compensate]);
   const found = map.z.filter((z) => z !== null).length;
@@ -139,7 +188,11 @@ function MapResult({ map, mapping, canResume, offsetZ }: { map: SurfaceMap; mapp
         <div className="flex-1 text-sm font-medium">
           Surface map
           <span className="ml-2 text-xs font-normal text-muted-foreground">
-            {complete ? `${map.spec.columns} × ${map.spec.rows}` : mapping ? `${map.done} of ${total}` : `paused at ${map.done} of ${total}`}
+            {complete
+              ? adaptive
+                ? `${done} points`
+                : `${map.spec.columns} × ${map.spec.rows}`
+              : `${mapping ? "" : "paused at "}${done} of ${total}${adaptive ? " so far" : ""}`}
           </span>
         </div>
         {!mapping && (
@@ -151,9 +204,11 @@ function MapResult({ map, mapping, canResume, offsetZ }: { map: SurfaceMap; mapp
 
       {!complete && (
         <div className="space-y-1">
-          <Progress value={(map.done / total) * 100} />
+          <Progress value={total > 0 ? (done / total) * 100 : 0} />
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="flex-1">{left !== null ? `About ${duration(left)} left` : "Timing the first point…"}</span>
+            <span className="flex-1">
+              {left === null ? "Timing the first point…" : adaptive ? `About ${duration(left)} for those; refining may add more` : `About ${duration(left)} left`}
+            </span>
             {mapping ? (
               <Button size="xs" variant="outline" onClick={() => act({ type: "pauseMap" })} title="Stops after this point, at the start height">
                 <Pause /> Pause
@@ -183,11 +238,11 @@ function MapResult({ map, mapping, canResume, offsetZ }: { map: SurfaceMap; mapp
             Range
           </span>
           <span className="text-right">{(range[1] - range[0]).toFixed(3)}</span>
-          {found + map.unreached.length < map.done && (
+          {found + map.unreached.length < done && (
             <>
               <span className="text-muted-foreground">Missed</span>
               <span className="text-right" title="Points with no contact within the depth">
-                {map.done - found - map.unreached.length}
+                {done - found - map.unreached.length}
               </span>
             </>
           )}

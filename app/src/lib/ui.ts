@@ -33,6 +33,12 @@ export interface ProbeForm {
   mapDepth: number;
   /** Map: a search and a slow touch per point instead of one touch. */
   mapPrecise: boolean;
+  /** Map: refine the grid where the surface needs it. */
+  mapAdaptive: boolean;
+  /** Map, adaptive: how many times the spacing may be halved. */
+  mapLevels: number;
+  /** Map, adaptive: how far a cell's centre may be from its corners' average before it's split, mm. */
+  mapTolerance: number;
 }
 
 export type MapView = "2d" | "3d";
@@ -85,6 +91,9 @@ export const useUi = create<Ui>(() => ({
     mapSpacing: 5,
     mapDepth: 10,
     mapPrecise: false,
+    mapAdaptive: false,
+    mapLevels: 3,
+    mapTolerance: 0.05,
   },
 }));
 
