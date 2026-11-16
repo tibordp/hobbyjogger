@@ -2,6 +2,7 @@
 import type { ProbeResult } from "./ProbeResult";
 import type { ProbeSettings } from "./ProbeSettings";
 import type { RunningProbe } from "./RunningProbe";
+import type { SurfaceMap } from "./SurfaceMap";
 
 export type ProbeState = { settings: ProbeSettings, running: RunningProbe | null, 
 /**
@@ -15,4 +16,8 @@ error: string | null,
 /**
  * After a failure: whether `RecoverProbe` knows which way to back the probe off.
  */
-canBackOff: boolean, };
+canBackOff: boolean, 
+/**
+ * The surface map being measured, or the last one.
+ */
+map: SurfaceMap | null, };

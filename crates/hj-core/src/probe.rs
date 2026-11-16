@@ -32,6 +32,11 @@ pub struct ProbeSettings {
     pub clearance: f64,
     /// How far down to search for a top surface, mm.
     pub z_search: f64,
+    /// 3D probe: how far the ball's bottom is below the probe body, mm. The body can't feel
+    /// anything, so surface maps keep it this far (less a margin) above what's around.
+    pub stylus_length: f64,
+    /// 3D probe: the body's diameter, mm, for what counts as around.
+    pub body_diameter: f64,
 }
 
 impl Default for ProbeSettings {
@@ -43,6 +48,9 @@ impl Default for ProbeSettings {
             travel_feed: 600.0,
             clearance: 3.0,
             z_search: 20.0,
+            // Makera's 3D probe (the only one there is for the Z1).
+            stylus_length: 13.0,
+            body_diameter: 17.0,
         }
     }
 }
@@ -201,6 +209,16 @@ pub(crate) enum Update {
     Done(std::result::Result<ProbeResult, String>),
     /// [`back_off`] finished.
     Recovered(std::result::Result<(), String>),
+    /// A surface map point: grid index, tip Z if found, seconds it took.
+    MapPoint {
+        index: usize,
+        z: Option<f64>,
+        /// No contact because the point was out of the stylus' reach.
+        limited: bool,
+        secs: f64,
+    },
+    /// A surface map scan stopped: whether it finished (rather than paused), or why it failed.
+    MapDone(std::result::Result<bool, String>),
 }
 
 /// The routine's side of the machine connection: send lines through the core, read the console
@@ -213,17 +231,22 @@ pub(crate) struct Io {
     pub settings: ProbeSettings,
 }
 
-type Result<T> = std::result::Result<T, String>;
+pub(crate) type Result<T> = std::result::Result<T, String>;
 
 const AXES: [char; 3] = ['X', 'Y', 'Z'];
 
 impl Io {
-    fn step(&self, text: &str) {
+    pub(crate) fn step(&self, text: &str) {
         let _ = self.updates.send(Update::Step(text.into()));
     }
 
     /// Send a probe move and wait for its `[PRB:…]` and `ok`. Returns whether it triggered.
-    async fn probe_move(&mut self, code: &str, delta: [f64; 3], feed: f64) -> Result<bool> {
+    pub(crate) async fn probe_move(
+        &mut self,
+        code: &str,
+        delta: [f64; 3],
+        feed: f64,
+    ) -> Result<bool> {
         let words: Vec<String> = (0..3)
             .filter(|&i| delta[i].abs() >= 1e-4)
             .map(|i| format!("{}{:.4}", AXES[i], delta[i]))
@@ -262,7 +285,7 @@ impl Io {
 
     /// Move by `delta`, stopping (with an error) if the probe touches anything on the way.
     /// Send a plain command and wait for its `ok`.
-    async fn command(&mut self, line: &str) -> Result<()> {
+    pub(crate) async fn command(&mut self, line: &str) -> Result<()> {
         self.updates
             .send(Update::Send(line.into()))
             .map_err(|_| "stopped".to_string())?;
@@ -282,7 +305,7 @@ impl Io {
 
     /// Move by `delta`, stopping if the probe touches anything on the way. Then it backs out to
     /// where the move started, which was clear, and reports the contact as an error.
-    async fn travel(&mut self, delta: [f64; 3]) -> Result<()> {
+    pub(crate) async fn travel(&mut self, delta: [f64; 3]) -> Result<()> {
         let feed = self.settings.travel_feed;
         let from = self.here;
         if !self.probe_move("G38.3", delta, feed).await? {
@@ -364,7 +387,7 @@ impl Io {
         Ok(contact)
     }
 
-    async fn release(&mut self, axis: usize, dir: f64) -> Result<()> {
+    pub(crate) async fn release(&mut self, axis: usize, dir: f64) -> Result<()> {
         let mut back = [0.0; 3];
         back[axis] = -dir * 2.0;
         if !self

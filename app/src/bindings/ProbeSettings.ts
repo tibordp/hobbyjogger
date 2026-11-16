@@ -20,4 +20,13 @@ clearance: number,
 /**
  * How far down to search for a top surface, mm.
  */
-zSearch: number, };
+zSearch: number, 
+/**
+ * 3D probe: how far the ball's bottom is below the probe body, mm. The body can't feel
+ * anything, so surface maps keep it this far (less a margin) above what's around.
+ */
+stylusLength: number, 
+/**
+ * 3D probe: the body's diameter, mm, for what counts as around.
+ */
+bodyDiameter: number, };

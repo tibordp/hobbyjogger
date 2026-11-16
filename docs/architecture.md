@@ -127,6 +127,11 @@ moments during the routine, so only `Done ATC` (or an alarm) ends it, and other 
 are refused until then. The frontend shows a dialog for the whole change. The probes are tools
 like any other: T9999 is the 3D probe, T0 the depth probe, T8888 the laser.
 
+`RemeasureTool` measures the tool that's in again without a change (`M491`, the firmware's own
+calibrate), for a tool that was taken out and put back. It shows as a change already measuring,
+marked `remeasure`, and ends at `Done ATC` like one. With the 3D probe the firmware's script
+switches the probe off at the end (a change to it leaves it on), so the core sends `M494.1` after.
+
 ## Outputs, overrides and the laser
 
 - Overrides are `M220` (feed), `M223` (spindle) and `M325` (laser power), allowed during a job;
@@ -168,3 +173,32 @@ routine and off after, as the firmware's own Z probing does. An
 unexpected contact on a positioning move makes the routine back out to where that move started. Results are machine coordinates; applying one is `SetOrigin`,
 a `G10 L20` relative to the current position, so nothing moves. Other motion is refused while a
 routine runs; Stop is halt + `$X`.
+
+### Surface maps
+
+A surface map (`hj_core::map`) is a routine of its own: a grid of touches down, run point by
+point in the same task slot (so Stop, Recover and the motion gating are shared), with its points
+kept in `ProbeState.map` as they come in. The scan starts from where the probe is, which becomes
+its top: moves never go above it, and each point searches down to a set depth below it. Between
+points it lifts only the probe clearance above the last contact and crosses with a guarded move;
+if the surface rises into the way, the 3D probe touches it sideways, releases, lifts another
+clearance and carries on (never above the top). The depth probe can't feel sideways contact, so
+with it every crossing is at the top. Rows alternate direction. A point with no contact within the
+depth is recorded as missing and the scan goes on.
+
+The probe body feels nothing, so with the 3D probe each point also has its own floor: no deeper
+than the stylus length (less 2 mm) below the highest point measured within the body's radius plus
+one grid step. A narrow hole deeper than that is recorded as out of reach instead of driving the
+body into its rim; crossings use the same floors at both ends. The depth from the start height
+only says where to look for the surface, so a scan can start well above the part. Points not
+measured yet can't count, so a wall taller than the stylus beside the path is still the user's to
+avoid, as is anything above the start height within a body width of the area.
+
+Pause asks the task to stop after the current point (at the top); Resume starts a new task from
+the next point, going up to the top first; Stop halts as for any routine and keeps the points so
+far. Export writes CSV, TSV or a binary STL of the grid in the current work coordinates. With ball
+compensation, each point is moved from the ball's centre back by the radius along the normal of
+the measured surface, estimated from its neighbours (the ball touches a slope off its bottom, so
+the raw tip reads high there). The simulator has a sloped plate with a spherical dome for this.
+The frontend has the same correction (`surfacePoints` in `app/src/lib/surfaceMap.ts`) for showing
+the map, so what's shown matches what's exported; the two must be kept in step.

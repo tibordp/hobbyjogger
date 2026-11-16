@@ -8,7 +8,8 @@ import type { ProbeSettings } from "@/bindings/ProbeSettings";
 import type { Side } from "@/bindings/Side";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { Field } from "@/components/Field";
+import { MapTab } from "@/components/MapTab";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { act } from "@/lib/actions";
 import { DEPTH_PROBE_TOOL, PROBE_TOOL, useConnected, useJobRunning, useMachineState, useStatus } from "@/lib/machine";
@@ -22,6 +23,7 @@ const KINDS: { kind: ProbeKind; label: string }[] = [
   { kind: "corner", label: "Corner" },
   { kind: "bore", label: "Bore" },
   { kind: "boss", label: "Boss" },
+  { kind: "map", label: "Map" },
 ];
 
 // ---- diagrams (top view, front at the bottom, except the surface's side view) ----
@@ -171,29 +173,9 @@ function instructions(f: ProbeForm) {
       return f.across === "xy"
         ? "Jog the probe above the boss, roughly over its centre."
         : `Jog the probe above the boss or web, roughly over its middle. It finds the centreline across ${f.across.toUpperCase()}.`;
+    case "map":
+      return "";
   }
-}
-
-function Field({ label, value, onChange, title }: { label: string; value: number; onChange: (v: number) => void; title?: string }) {
-  const [draft, setDraft] = useState<string | null>(null);
-  return (
-    <label className="flex items-center gap-1.5 text-xs text-muted-foreground" title={title}>
-      {label}
-      <Input
-        className="h-7 w-16 px-1.5 text-right font-mono text-xs"
-        inputMode="decimal"
-        value={draft ?? String(value)}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => {
-          const v = Number((draft ?? "").replace(",", "."));
-          if (draft !== null && Number.isFinite(v) && v > 0) onChange(v);
-          setDraft(null);
-        }}
-        onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-      />
-      mm
-    </label>
-  );
 }
 
 function Settings({ settings }: { settings: ProbeSettings }) {
@@ -206,6 +188,8 @@ function Settings({ settings }: { settings: ProbeSettings }) {
       <Field label="Slow" value={settings.slowFeed} onChange={(slowFeed) => set({ slowFeed })} title="Measuring touch, mm/min" />
       <Field label="Travel" value={settings.travelFeed} onChange={(travelFeed) => set({ travelFeed })} title="Moves between touches (they stop on contact too), mm/min" />
       <Field label="Z search" value={settings.zSearch} onChange={(zSearch) => set({ zSearch })} title="How far down to look for the top" />
+      <Field label="Stylus" value={settings.stylusLength} onChange={(stylusLength) => set({ stylusLength })} title="3D probe: from the ball's bottom to the probe body. Maps keep the body this far (less 2 mm) above what's around." />
+      <Field label="Body Ø" value={settings.bodyDiameter} onChange={(bodyDiameter) => set({ bodyDiameter })} title="3D probe: the body's diameter, for what's around a point when mapping" />
     </div>
   );
 }
@@ -310,11 +294,13 @@ export function ProbePanel() {
   const hasProbe = status?.tool?.number === PROBE_TOOL;
   // The depth probe only touches down: Surface works with it, nothing else.
   const depthOnly = status?.tool?.number === DEPTH_PROBE_TOOL;
-  const canProbe = hasProbe || (depthOnly && form.kind === "surface");
+  // Maps only touch down too, but cross at the top with the depth probe (it can't feel the part
+  // in the way).
+  const canProbe = hasProbe || (depthOnly && (form.kind === "surface" || form.kind === "map"));
   const running = probe?.running ?? null;
   const idle = connected && state === "idle" && !job && !changing && !running;
   // Nothing to show but how to get a probe in.
-  const collapsed = !hasProbe && !depthOnly && !running && !probe?.error && !probe?.result;
+  const collapsed = !hasProbe && !depthOnly && !running && !probe?.error && !probe?.result && !probe?.map;
 
   if (collapsed) {
     return (
@@ -375,46 +361,51 @@ export function ProbePanel() {
           ))}
         </ToggleGroup>
 
-        <div className="flex gap-3">
-          <Diagram form={form} />
-          <div className="space-y-2">
-            <p className="text-xs leading-relaxed text-muted-foreground">{instructions(form)}</p>
-            <div className="flex flex-wrap gap-x-3 gap-y-1.5">
-              {form.kind === "edge" && (
-                <Field label="Search" value={form.edgeSearch} onChange={(edgeSearch) => setProbeForm({ edgeSearch })} title="How far it moves in looking for the edge" />
-              )}
-              {form.kind === "corner" && (
-                <Field label="Reach" value={form.reach} onChange={(reach) => setProbeForm({ reach })} title="How far the edges may be from where the probe starts" />
-              )}
-              {(form.kind === "bore" || form.kind === "boss") && (
-                <ToggleGroup
-                  type="single"
-                  variant="outline"
-                  size="sm"
-                  spacing={0}
-                  value={form.across}
-                  onValueChange={(across) => across && setProbeForm({ across: across as Across })}
-                  title="Both axes for a centre, or one for a centreline"
-                >
-                  {ACROSS.map(([value, label]) => (
-                    <ToggleGroupItem key={value} value={value} className="h-7 px-2 font-mono text-xs">
-                      {label}
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-              )}
-              {form.kind === "bore" && (
-                <Field label={form.across === "xy" ? "About Ø" : "About width"} value={form.boreDiameter} onChange={(boreDiameter) => setProbeForm({ boreDiameter })} title="Roughly; it searches a little beyond" />
-              )}
-              {form.kind === "boss" && (
-                <Field label={form.across === "xy" ? "About Ø" : "About width"} value={form.bossDiameter} onChange={(bossDiameter) => setProbeForm({ bossDiameter })} title="Roughly, or a bit more: it goes down outside this" />
-              )}
-              {(form.kind === "corner" || form.kind === "boss") && (
-                <Field label="Depth" value={form.depth} onChange={(depth) => setProbeForm({ depth })} title="How far below the top to touch the sides" />
-              )}
+        {form.kind === "map" ? (
+          <MapTab canStart={idle && canProbe} />
+        ) : (
+          <div className="flex gap-3">
+            <Diagram form={form} />
+            <div className="space-y-2">
+              <p className="text-xs leading-relaxed text-muted-foreground">{instructions(form)}</p>
+              <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+                {form.kind === "edge" && (
+                  <Field label="Search" value={form.edgeSearch} onChange={(edgeSearch) => setProbeForm({ edgeSearch })} title="How far it moves in looking for the edge" />
+                )}
+                {form.kind === "corner" && (
+                  <Field label="Reach" value={form.reach} onChange={(reach) => setProbeForm({ reach })} title="How far the edges may be from where the probe starts" />
+                )}
+                {(form.kind === "bore" || form.kind === "boss") && (
+                  <ToggleGroup
+                    type="single"
+                    variant="outline"
+                    size="sm"
+                    spacing={0}
+                    value={form.across}
+                    onValueChange={(across) => across && setProbeForm({ across: across as Across })}
+                    title="Both axes for a centre, or one for a centreline"
+                  >
+                    {ACROSS.map(([value, label]) => (
+                      <ToggleGroupItem key={value} value={value} className="h-7 px-2 font-mono text-xs">
+                        {label}
+                      </ToggleGroupItem>
+                    ))}
+                  </ToggleGroup>
+                )}
+                {form.kind === "bore" && (
+                  <Field label={form.across === "xy" ? "About Ø" : "About width"} value={form.boreDiameter} onChange={(boreDiameter) => setProbeForm({ boreDiameter })} title="Roughly; it searches a little beyond" />
+                )}
+                {form.kind === "boss" && (
+                  <Field label={form.across === "xy" ? "About Ø" : "About width"} value={form.bossDiameter} onChange={(bossDiameter) => setProbeForm({ bossDiameter })} title="Roughly, or a bit more: it goes down outside this" />
+                )}
+                {(form.kind === "corner" || form.kind === "boss") && (
+                  <Field label="Depth" value={form.depth} onChange={(depth) => setProbeForm({ depth })} title="How far below the top to touch the sides" />
+                )}
+              </div>
             </div>
           </div>
-        </div>
+
+        )}
 
         {running ? (
           <div className="flex items-center gap-2">
@@ -428,9 +419,11 @@ export function ProbePanel() {
             </Button>
           </div>
         ) : (
-          <Button className="w-full" disabled={!idle || !canProbe} onClick={() => act({ type: "probe", routine: routineOf(form) })}>
-            <CircleDot /> Probe {KINDS.find((k) => k.kind === form.kind)!.label.toLowerCase()}
-          </Button>
+          form.kind !== "map" && (
+            <Button className="w-full" disabled={!idle || !canProbe} onClick={() => act({ type: "probe", routine: routineOf(form) })}>
+              <CircleDot /> Probe {KINDS.find((k) => k.kind === form.kind)!.label.toLowerCase()}
+            </Button>
+          )
         )}
 
         {probe?.error && !running && (

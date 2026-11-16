@@ -51,3 +51,11 @@ export function isProbe(n: number | null | undefined) {
 export function canJog(state: MachineState | null, job: boolean) {
   return !job && (state === "idle" || state === "run");
 }
+
+/** Machine − work for X, Y, Z (tool length included), from the live position. */
+export function useWorkOffset(): [number, number, number] | null {
+  const t = useStore((s) => s.telemetry);
+  const connected = useStore((s) => s.state?.connection.kind === "connected");
+  if (!t || !connected) return null;
+  return [t.machine[0] - t.work[0], t.machine[1] - t.work[1], t.machine[2] - t.work[2]];
+}

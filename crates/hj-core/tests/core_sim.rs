@@ -1223,3 +1223,215 @@ async fn sends_console_batches_line_by_line() {
             .any(|e| e.kind == ConsoleKind::Sent && e.text == "G1 X-1")
     );
 }
+
+#[tokio::test]
+async fn maps_the_simulated_plate() {
+    use hj_core::map::{ExportFormat, MapSpec};
+    use hj_sim::{BALL_RADIUS, DOME_CENTER, DOME_RADIUS, PLATE_SLOPE, plate_top};
+
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    core.request(Request::Mdi {
+        line: "M493.2 T9999".into(),
+    })
+    .await
+    .unwrap();
+    core.request(Request::SetProbeSettings {
+        settings: hj_core::probe::ProbeSettings {
+            fast_feed: 600.0,
+            slow_feed: 300.0,
+            travel_feed: 1200.0,
+            // Low, so the dome rises into some moves across (they touch it, lift and go on).
+            clearance: 1.0,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    // Above the dome's peak (Z-65) and the plate.
+    core.request(Request::Mdi {
+        line: "G53 G0 X-75 Y-140 Z-62".into(),
+    })
+    .await
+    .unwrap();
+    until(&sink, "above the plate", |m| {
+        state_of(m) == Some("idle")
+            && m.telemetry
+                .as_ref()
+                .is_some_and(|t| (t.machine[2] + 62.0).abs() < 1e-6)
+    })
+    .await;
+
+    let spec = MapSpec {
+        min: [-75.0, -140.0],
+        max: [-45.0, -120.0],
+        columns: 5,
+        rows: 4,
+        depth: 15.0,
+        precise: false,
+    };
+    let map = |m: &Mirror| m.state.as_ref().unwrap()["probe"]["map"].clone();
+    let running = |m: &Mirror| !m.state.as_ref().unwrap()["probe"]["running"].is_null();
+    core.request(Request::MapSurface { spec: spec.clone() })
+        .await
+        .unwrap();
+    // Pause partway, then carry on.
+    until(&sink, "a few points", |m| {
+        map(m)["done"].as_u64().unwrap() >= 4
+    })
+    .await;
+    core.request(Request::PauseMap).await.unwrap();
+    until(&sink, "paused", |m| {
+        !running(m) && state_of(m) == Some("idle")
+    })
+    .await;
+    let paused = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(paused["error"].is_null(), "{paused}");
+    let done = paused["map"]["done"].as_u64().unwrap();
+    assert!((4..20).contains(&done), "{paused}");
+    core.request(Request::ResumeMap).await.unwrap();
+    until(&sink, "map done", |m| !running(m) && map(m)["done"] == 20).await;
+    let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(probe["error"].is_null(), "{probe}");
+
+    // Each tip where a ball dropped straight down first touches the plate or the dome.
+    let r = BALL_RADIUS;
+    for (i, z) in probe["map"]["z"].as_array().unwrap().iter().enumerate() {
+        let [x, y] = spec.at(i);
+        let plate = plate_top(x) + r * PLATE_SLOPE.hypot(1.0) - r;
+        let d = (x - DOME_CENTER[0]).hypot(y - DOME_CENTER[1]);
+        let dome = if d < DOME_RADIUS + r {
+            DOME_CENTER[2] + ((DOME_RADIUS + r).powi(2) - d * d).sqrt() - r
+        } else {
+            f64::NEG_INFINITY
+        };
+        let want = plate.max(dome);
+        let got = z.as_f64().unwrap();
+        assert!(
+            (got - want).abs() < 0.002,
+            "point {i} at X{x} Y{y}: {got} vs {want}"
+        );
+    }
+
+    // Some moves across touched the dome and backed off sideways (G38.5 without Z).
+    let bumps = sink
+        .0
+        .lock()
+        .unwrap()
+        .console
+        .iter()
+        .filter(|e| e.text.starts_with("G38.5") && !e.text.contains('Z'))
+        .count();
+    assert!(bumps > 0, "no move across touched the dome");
+
+    let dir = std::env::temp_dir().join(format!("hj-map-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("map.csv");
+    let stl = dir.join("map.stl");
+    for (path, format) in [(&csv, ExportFormat::Csv), (&stl, ExportFormat::Stl)] {
+        core.request(Request::ExportMap {
+            path: path.to_string_lossy().into(),
+            format,
+            compensate: true,
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(&csv).unwrap().lines().count(), 21);
+    // 4 × 3 cells, two triangles each.
+    assert_eq!(std::fs::read(&stl).unwrap().len(), 84 + 24 * 50);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // Over the deep hole, with a search depth that would take the probe body below its rim: the
+    // middle point stops at the stylus' reach below the rim around it, and is left out.
+    core.request(Request::Mdi {
+        line: "G53 G0 X-42 Y-149 Z-62".into(),
+    })
+    .await
+    .unwrap();
+    until(&sink, "beside the hole", |m| {
+        state_of(m) == Some("idle")
+            && m.telemetry.as_ref().is_some_and(|t| {
+                (t.machine[0] + 42.0).abs() < 1e-6 && (t.machine[1] + 149.0).abs() < 1e-6
+            })
+    })
+    .await;
+    core.request(Request::MapSurface {
+        spec: MapSpec {
+            min: [-42.0, -149.0],
+            max: [-34.0, -141.0],
+            columns: 3,
+            rows: 3,
+            depth: 25.0,
+            precise: false,
+        },
+    })
+    .await
+    .unwrap();
+    until(&sink, "hole mapped", |m| !running(m) && map(m)["done"] == 9).await;
+    let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(probe["error"].is_null(), "{probe}");
+    assert_eq!(probe["map"]["unreached"], serde_json::json!([4]), "{probe}");
+    assert!(probe["map"]["z"][4].is_null());
+    // It searched down to 11 mm (stylus 13 less the 2 mm margin) below the highest rim point.
+    let rim = (0..9)
+        .filter(|&i| i != 4)
+        .map(|i| probe["map"]["z"][i].as_f64().unwrap())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let deepest = sink
+        .0
+        .lock()
+        .unwrap()
+        .console
+        .iter()
+        .filter_map(|e| {
+            e.text
+                .strip_prefix("[PRB:")
+                .and_then(|r| r.split(',').nth(2))
+                .and_then(|z| z.split(':').next())
+                .and_then(|z| z.parse::<f64>().ok())
+        })
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        (deepest - (rim - 11.0)).abs() < 0.01,
+        "deepest {deepest}, rim {rim}"
+    );
+
+    // Remeasure the probe's length without a change; the probe is switched back on after.
+    // Near the sensor first: the simulated measuring is slow enough as it is.
+    until(&sink, "idle after the hole", |m| {
+        state_of(m) == Some("idle")
+    })
+    .await;
+    core.request(Request::Mdi {
+        line: "G53 G0 Z-3\nG53 G0 X-9.4 Y-13.3".into(),
+    })
+    .await
+    .unwrap();
+    until(&sink, "by the sensor", |m| {
+        state_of(m) == Some("idle")
+            && m.state.as_ref().unwrap()["batch"].is_null()
+            && m.telemetry
+                .as_ref()
+                .is_some_and(|t| (t.machine[0] + 9.4).abs() < 1e-6)
+    })
+    .await;
+    core.request(Request::RemeasureTool).await.unwrap();
+    until(&sink, "measuring", |m| {
+        m.state.as_ref().unwrap()["toolChange"]["phase"] == "measuring"
+    })
+    .await;
+    until(&sink, "remeasured", |m| {
+        let s = m.state.as_ref().unwrap();
+        s["toolChange"].is_null() && m.console.iter().any(|e| e.text == "M494.1")
+    })
+    .await;
+    let s = sink.0.lock().unwrap().state.as_ref().unwrap()["status"]["tool"].clone();
+    assert_eq!(s["number"], 9999, "{s}");
+}

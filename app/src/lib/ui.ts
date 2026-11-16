@@ -6,7 +6,8 @@ import type { Corner } from "@/bindings/Corner";
 import type { Routine } from "@/bindings/Routine";
 import type { Side } from "@/bindings/Side";
 
-export type ProbeKind = Routine["kind"];
+/** A routine, or a surface map (which isn't one: it runs long and keeps its points). */
+export type ProbeKind = Routine["kind"] | "map";
 
 /** The probing form, kept between uses (and shown as a preview on the bed). */
 export interface ProbeForm {
@@ -23,6 +24,15 @@ export interface ProbeForm {
   bossDiameter: number;
   /** Bore and boss: both axes for a centre, or one for a centreline. */
   across: Across;
+  /** Map: the area's front-left and back-right corners, work X/Y; null until picked. */
+  mapMin: [number, number] | null;
+  mapMax: [number, number] | null;
+  /** Map: distance between points, mm (rounded to fit the area evenly). */
+  mapSpacing: number;
+  /** Map: how far below the start height to search, mm. */
+  mapDepth: number;
+  /** Map: a search and a slow touch per point instead of one touch. */
+  mapPrecise: boolean;
 }
 
 export type MapView = "2d" | "3d";
@@ -33,6 +43,8 @@ interface Ui {
   probe: ProbeForm;
   /** The bed map, top-down or in 3D; remembered between runs. */
   mapView: MapView;
+  /** Surface maps: show and export points corrected for the ball touching slopes off its bottom. */
+  mapCompensate: boolean;
 }
 
 const MAP_VIEW_KEY = "hj.mapView";
@@ -57,6 +69,7 @@ export function setMapView(mapView: MapView) {
 export const useUi = create<Ui>(() => ({
   jogSpeed: 0.25,
   mapView: storedMapView(),
+  mapCompensate: true,
   probe: {
     kind: "corner",
     side: "left",
@@ -67,6 +80,11 @@ export const useUi = create<Ui>(() => ({
     boreDiameter: 10,
     bossDiameter: 10,
     across: "xy",
+    mapMin: null,
+    mapMax: null,
+    mapSpacing: 5,
+    mapDepth: 10,
+    mapPrecise: false,
   },
 }));
 
@@ -74,8 +92,11 @@ export function setProbeForm(patch: Partial<ProbeForm>) {
   useUi.setState((s) => ({ probe: { ...s.probe, ...patch } }));
 }
 
+/** The routine the form describes; not for maps. */
 export function routineOf(f: ProbeForm): Routine {
   switch (f.kind) {
+    case "map":
+      throw new Error("a map isn't a routine");
     case "surface":
       return { kind: "surface" };
     case "edge":

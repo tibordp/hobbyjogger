@@ -1,3 +1,4 @@
+import { Ruler } from "lucide-react";
 import { useState } from "react";
 
 import {
@@ -100,6 +101,19 @@ export function ToolPicker({ open, onOpenChange }: { open: boolean; onOpenChange
         </div>
 
         <AlertDialogFooter>
+          {current !== null && current >= 0 && current !== LASER_TOOL && (
+            <Button
+              variant="outline"
+              className="sm:mr-auto"
+              title="Measures the tool that's in on the tool sensor again, without changing it: after taking it out and putting it back, say"
+              onClick={() => {
+                onOpenChange(false);
+                void act({ type: "remeasureTool" });
+              }}
+            >
+              <Ruler /> Remeasure {toolName(current)}
+            </Button>
+          )}
           <AlertDialogCancel>Cancel</AlertDialogCancel>
         </AlertDialogFooter>
       </AlertDialogContent>

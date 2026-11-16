@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 
+import type { ConsoleEntry } from "@/bindings/ConsoleEntry";
 import type { ConsoleKind } from "@/bindings/ConsoleKind";
 import { ConsoleInput } from "@/components/ConsoleInput";
 import { useStore } from "@/lib/store";
@@ -12,7 +13,20 @@ const KIND_STYLE: Record<ConsoleKind, string> = {
   info: "text-muted-foreground italic",
 };
 
-const time = (ms: number) => new Date(ms).toLocaleTimeString([], { hour12: false });
+// One formatter: `toLocaleTimeString` builds a new one every call, which adds up.
+const timeFormat = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+
+/** A line never changes once logged, so only new ones render (the log runs to thousands of lines,
+ * and a probing routine adds several a second). */
+const Row = memo(function Row({ entry: e }: { entry: ConsoleEntry }) {
+  return (
+    <div className={cn("whitespace-pre-wrap", KIND_STYLE[e.kind])}>
+      <span className="mr-2 text-muted-foreground/60">{timeFormat.format(e.time)}</span>
+      {e.kind === "sent" && "> "}
+      {e.text}
+    </div>
+  );
+});
 
 export function ConsolePanel() {
   const entries = useStore((s) => s.console);
@@ -35,11 +49,7 @@ export function ConsolePanel() {
         }}
       >
         {entries.map((e) => (
-          <div key={e.id} className={cn("whitespace-pre-wrap", KIND_STYLE[e.kind])}>
-            <span className="mr-2 text-muted-foreground/60">{time(e.time)}</span>
-            {e.kind === "sent" && "> "}
-            {e.text}
-          </div>
+          <Row key={e.id} entry={e} />
         ))}
       </div>
       <ConsoleInput />

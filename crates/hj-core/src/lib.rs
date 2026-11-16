@@ -2,6 +2,7 @@
 //! of the UI framework. See `docs/architecture.md`.
 
 mod core;
+pub mod map;
 pub mod probe;
 pub mod program;
 pub mod settings;

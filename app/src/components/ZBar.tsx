@@ -20,7 +20,6 @@ import { cn } from "@/lib/utils";
 /** Used until the machine reports its Z limit (the Z1's). */
 const DEFAULT_MIN_Z = -102;
 const W = 44;
-export const Z_BAR_WIDTH = W;
 /** The track's left and right edges, px. */
 const L = 18;
 const R = 28;

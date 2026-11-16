@@ -7,10 +7,13 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { Analysis } from "@/bindings/Analysis";
+import type { SurfaceMap } from "@/bindings/SurfaceMap";
 import { Button } from "@/components/ui/button";
 import { useConnected, useJobRunning } from "@/lib/machine";
 import { useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
+import { heat, pointsRange, surfacePoints, zRange, type Vec3 as MapPoint } from "@/lib/surfaceMap";
+import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
 /** Used until the machine reports its limits (Z1 values). */
@@ -203,6 +206,11 @@ export default function Bed3D() {
   useEffect(() => api?.setTool(mx === null || my === null || mz === null ? null : [mx, my, mz], bed.min[2]), [api, mx, my, mz, bed]);
   const contacts = probe?.contacts;
   useEffect(() => api?.setContacts(contacts ?? []), [api, contacts]);
+  const surfaceMap = probe?.map ?? null;
+  const compensate = useUi((s) => s.mapCompensate);
+  const ball = probe?.settings.ballDiameter ?? 0;
+  const surfacePts = useMemo(() => (surfaceMap ? surfacePoints(surfaceMap, ball / 2, compensate) : []), [surfaceMap, ball, compensate]);
+  useEffect(() => api?.setSurface(surfaceMap, surfacePts), [api, surfaceMap, surfacePts]);
   useEffect(() => api?.setPerspective(perspective), [api, perspective]);
 
   // Frame the program when one appears (or the bed, without), from the angle.
@@ -210,12 +218,12 @@ export default function Bed3D() {
   const hasProgram = analysis !== null && offset !== null;
   useEffect(() => {
     if (!api) return;
-    if (!framed.current || hasProgram) api.look("iso", fitBox(analysis, offset, bed));
+    if (!framed.current || hasProgram) api.look("iso", fitBox(analysis, offset, bed, surfaceMap));
     framed.current = true;
     // Only when a program comes or goes, not as it's edited or the offset moves.
   }, [api, hasProgram]);
 
-  const look = (view: View) => api?.look(view, fitBox(analysis, offset, bed));
+  const look = (view: View) => api?.look(view, fitBox(analysis, offset, bed, surfaceMap));
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -230,8 +238,8 @@ export default function Bed3D() {
           size="xs"
           variant="outline"
           className="bg-background/70"
-          title={analysis ? "Fit the program" : "Fit the bed"}
-          onClick={() => api?.fit(fitBox(analysis, offset, bed))}
+          title={analysis ? "Fit the program" : surfaceMap ? "Fit the map" : "Fit the bed"}
+          onClick={() => api?.fit(fitBox(analysis, offset, bed, surfaceMap))}
         >
           <Focus /> Fit
         </Button>
@@ -252,9 +260,13 @@ export default function Bed3D() {
   );
 }
 
-/** The program's extent where it is, or the bed's. */
-function fitBox(analysis: Analysis | null, offset: Vec3 | null, bed: Box3): Box3 {
+/** The program's extent where it is, or a surface map's, or the bed's. */
+function fitBox(analysis: Analysis | null, offset: Vec3 | null, bed: Box3, map: SurfaceMap | null): Box3 {
   const b = analysis?.bounds;
+  const range = map && zRange(map);
+  if ((!b || !offset) && map && range) {
+    return { min: [map.spec.min[0], map.spec.min[1], range[0]], max: [map.spec.max[0], map.spec.max[1], range[1]] };
+  }
   if (!b || !offset) return bed;
   return {
     min: [0, 1, 2].map((i) => b.min[i] + offset[i]) as Vec3,
@@ -332,6 +344,8 @@ function setup(el: HTMLDivElement) {
   let highlightLine: THREE.LineSegments | null = null;
   let tool: THREE.Group | null = null;
   let contacts: THREE.Points | null = null;
+  const surface = new THREE.Group();
+  scene.add(surface);
 
   const clear = (g: THREE.Object3D) => {
     for (const c of [...g.children]) {
@@ -457,6 +471,45 @@ function setup(el: HTMLDivElement) {
       }
       render();
     },
+    /** A surface map's points (`surface` from [`surfacePoints`]), coloured low to high, joined to
+     * their measured neighbours. */
+    setSurface(map: SurfaceMap | null, points: (MapPoint | null)[]) {
+      clear(surface);
+      const range = map && pointsRange(points);
+      if (map && range) {
+        const { spec } = map;
+        const span = range[1] - range[0];
+        const at = (i: number): number[] => points[i]!;
+        const colour = (i: number) => {
+          const [r, g, b] = heat(span > 0 ? (points[i]![2] - range[0]) / span : 0.5);
+          return new THREE.Color(r, g, b).convertSRGBToLinear().toArray();
+        };
+        const pos: number[] = [];
+        const col: number[] = [];
+        const wire: number[] = [];
+        const wireCol: number[] = [];
+        map.z.forEach((z, i) => {
+          if (z === null) return;
+          pos.push(...at(i));
+          col.push(...colour(i));
+          const c = i % spec.columns;
+          for (const j of [c + 1 < spec.columns ? i + 1 : -1, i + spec.columns]) {
+            if (j < 0 || j >= map.z.length || map.z[j] === null) continue;
+            wire.push(...at(i), ...at(j));
+            wireCol.push(...colour(i), ...colour(j));
+          }
+        });
+        const dots = new THREE.BufferGeometry();
+        dots.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        dots.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+        surface.add(new THREE.Points(dots, new THREE.PointsMaterial({ size: 4, sizeAttenuation: false, vertexColors: true })));
+        const lines = new THREE.BufferGeometry();
+        lines.setAttribute("position", new THREE.Float32BufferAttribute(wire, 3));
+        lines.setAttribute("color", new THREE.Float32BufferAttribute(wireCol, 3));
+        surface.add(new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.6 })));
+      }
+      render();
+    },
     setPerspective(on: boolean) {
       const next = on ? persp : ortho;
       if (next === camera) return;
@@ -491,7 +544,7 @@ function setup(el: HTMLDivElement) {
       ro.disconnect();
       controls.dispose();
       for (const p of paths) p.dispose();
-      for (const g of [bedGroup, origin, program, marks]) clear(g);
+      for (const g of [bedGroup, origin, program, marks, surface]) clear(g);
       for (const m of [feed, feedDone, rapid, rapidDone, highlight]) m.dispose();
       renderer.dispose();
       renderer.domElement.remove();

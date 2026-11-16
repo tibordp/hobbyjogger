@@ -88,7 +88,27 @@ pub const BOSS_HEIGHT: f64 = 5.0;
 /// The simulated probe's ball radius.
 pub const BALL_RADIUS: f64 = 1.0;
 
-/// Whether the probe ball, with its bottom (the tool tip) at `tip`, touches the part. The part is
+/// A second part, for surface mapping: a plate whose top slopes up toward +X, with a spherical
+/// dome rising out of it and a deep hole in one corner. Both have exact ball contact, so a map of it can be checked against the
+/// true surface.
+pub const PLATE_MIN: [f64; 2] = [-90.0, -150.0];
+pub const PLATE_MAX: [f64; 2] = [-30.0, -110.0];
+/// The plate's top: `PLATE_TOP + PLATE_SLOPE * (x - PLATE_MIN[0])`.
+pub const PLATE_TOP: f64 = -72.0;
+pub const PLATE_SLOPE: f64 = 0.05;
+pub const DOME_CENTER: [f64; 3] = [-60.0, -130.0, -80.0];
+pub const DOME_RADIUS: f64 = 15.0;
+/// A narrow, deep hole in the plate: deeper than the probe's stylus is long.
+pub const HOLE_CENTER: [f64; 2] = [-38.0, -145.0];
+pub const HOLE_DIAMETER: f64 = 6.0;
+pub const HOLE_DEPTH: f64 = 20.0;
+
+/// The plate's top at `x`, ignoring the dome.
+pub fn plate_top(x: f64) -> f64 {
+    PLATE_TOP + PLATE_SLOPE * (x - PLATE_MIN[0])
+}
+
+/// Whether the probe ball, with its bottom (the tool tip) at `tip`, touches a part. The block is
 /// grown by the ball radius and tested against the ball centre, which is exact on faces and close
 /// enough at edges.
 fn touches_part(tip: [f64; 3]) -> bool {
@@ -101,7 +121,17 @@ fn touches_part(tip: [f64; 3]) -> bool {
     let in_bore = dist(BORE_CENTER) < BORE_DIAMETER / 2.0 - r && c[2] > PART_TOP - BORE_DEPTH + r;
     let in_boss =
         dist(BOSS_CENTER) <= BOSS_DIAMETER / 2.0 + r && c[2] <= PART_TOP + BOSS_HEIGHT + r;
-    (in_block && !in_bore) || in_boss
+    // The plate's sloped top as a plane, and the dome as a whole sphere (its lower part is
+    // inside the plate anyway).
+    let in_plate = (PLATE_MIN[0] - r..=PLATE_MAX[0] + r).contains(&c[0])
+        && (PLATE_MIN[1] - r..=PLATE_MAX[1] + r).contains(&c[1])
+        && (c[2] - plate_top(c[0])) / PLATE_SLOPE.hypot(1.0) <= r;
+    let d = DOME_CENTER;
+    let in_hole =
+        dist(HOLE_CENTER) < HOLE_DIAMETER / 2.0 - r && c[2] > plate_top(c[0]) - HOLE_DEPTH + r;
+    let in_dome = ((c[0] - d[0]).powi(2) + (c[1] - d[1]).powi(2) + (c[2] - d[2]).powi(2)).sqrt()
+        <= DOME_RADIUS + r;
+    (in_block && !in_bore) || in_boss || (in_plate && !in_hole) || in_dome
 }
 
 /// A `G38.x` waiting for its move to finish before reporting.
@@ -550,6 +580,25 @@ impl Machine {
         self.atc = Some(Atc::Measuring(t));
     }
 
+    /// `M491`: measure the tool that's in on the sensor again, no change.
+    fn remeasure_tool(&mut self, out: &mut Vec<String>) {
+        if self.tool < 0 {
+            out.push("error:no tool to measure\n".into());
+            return;
+        }
+        self.atc_return = [self.mpos[0], self.mpos[1]];
+        let mut p = self.planned();
+        p[2] = ATC_CLEARANCE_Z;
+        self.queue(p, MAX_RATE[2], out);
+        p[..2].copy_from_slice(&ATC_SENSOR_XY);
+        self.queue(p, MAX_RATE[0], out);
+        p[2] = ATC_SENSOR_Z - (tool_length(self.tool) - tool_length(3));
+        self.queue(p, 500.0 / 60.0, out);
+        p[2] = -20.0;
+        self.queue(p, MAX_RATE[2], out);
+        self.atc = Some(Atc::Measuring(self.tool));
+    }
+
     fn halt_with(&mut self, reason: u32) {
         self.atc = None;
         self.probe_report = None;
@@ -705,6 +754,7 @@ impl Machine {
                 self.start_tool_change(target, out);
             }
             Some(4902) => self.confirm_tool_change(out),
+            Some(4910) => self.remeasure_tool(out),
             Some(2200) => self.feed_override = s_word.unwrap_or(100.0).clamp(10.0, 1000.0),
             Some(2230) => self.spindle_override = s_word.unwrap_or(100.0).clamp(50.0, 200.0),
             Some(3250) => self.laser_scale = s_word.unwrap_or(100.0),
@@ -1350,6 +1400,22 @@ mod tests {
         assert_eq!(
             (s.work_pos.x(), s.work_pos.y(), s.work_pos.z()),
             (0.0, 0.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn remeasures_the_tool() {
+        let mut m = Machine::default();
+        m.command("M493.2 T9999");
+        let out = m.command("M491");
+        assert!(!out.iter().any(|l| l.starts_with("error")), "{out:?}");
+        run(&mut m, 60.0);
+        assert_eq!(m.state(), "Idle");
+        assert_eq!(m.tool, 9999);
+        assert!(
+            m.outbox
+                .iter()
+                .any(|f| String::from_utf8_lossy(&f.payload).contains("Done ATC"))
         );
     }
 

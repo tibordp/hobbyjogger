@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::map::{ExportFormat, MapSpec, SurfaceMap};
 use crate::probe::{ProbeResult, ProbeSettings, Routine};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, TS)]
@@ -111,6 +112,8 @@ pub struct ProbeState {
     pub error: Option<String>,
     /// After a failure: whether `RecoverProbe` knows which way to back the probe off.
     pub can_back_off: bool,
+    /// The surface map being measured, or the last one.
+    pub map: Option<SurfaceMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, TS)]
@@ -136,6 +139,8 @@ pub const DEPTH_PROBE_TOOL: i32 = 0;
 pub struct ToolChange {
     pub target: i32,
     pub phase: ToolChangePhase,
+    /// Measuring the tool that's in again (`RemeasureTool`), not changing it.
+    pub remeasure: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
@@ -540,8 +545,29 @@ pub enum Request {
     /// After a routine stopped partway: clear a halt, back the probe off the way it came until it
     /// releases, and clear the error.
     RecoverProbe,
+    /// Measure the tool that's in on the sensor again (`M491`), after it was taken out and put
+    /// back, say. Shows as a tool change in its measuring phase. Not for the laser.
+    RemeasureTool,
     /// Clear the probing error or result without moving.
     DismissProbe,
+    /// Start a surface map from the current position, which is its top height: the probe must
+    /// be above everything in the area. Replaces the last map.
+    MapSurface {
+        spec: MapSpec,
+    },
+    /// Carry on with a paused or stopped map, from the point after the last one measured.
+    ResumeMap,
+    /// Stop a running map after the point it's on, at its top height.
+    PauseMap,
+    /// Forget the map.
+    DiscardMap,
+    /// Write the map to `path` in work coordinates. With `compensate`, corrected for the ball
+    /// touching slopes off its bottom ([`crate::map::surface`]).
+    ExportMap {
+        path: String,
+        format: ExportFormat,
+        compensate: bool,
+    },
     SetProbeSettings {
         settings: ProbeSettings,
     },

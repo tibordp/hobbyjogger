@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use ts_rs::TS;
 
+use crate::map::{self, SurfaceMap};
 use crate::probe::{self, Update};
 use crate::settings;
 use crate::state::*;
@@ -160,6 +162,9 @@ impl Core {
             routine_lines: None,
             back_off: None,
             routine_tx,
+            map_pause: Arc::new(AtomicBool::new(false)),
+            probe_on_after_atc: false,
+            mapping: false,
             held: None,
             polls: 0,
             batch: VecDeque::new(),
@@ -298,6 +303,12 @@ struct Actor {
     back_off: Option<[f64; 3]>,
     /// For routines to report back; the receiver is in [`Actor::run`].
     routine_tx: mpsc::UnboundedSender<Update>,
+    /// Set to ask a running surface map to stop after its current point.
+    map_pause: Arc<AtomicBool>,
+    /// The running routine is a surface map.
+    mapping: bool,
+    /// Switch the 3D probe back on (`M494.1`) when the tool change running ends.
+    probe_on_after_atc: bool,
     held: Option<HeldJog>,
     polls: u32,
     /// Lines of the running batch still to send; the one sent last is waiting for its `ok`.
@@ -602,6 +613,9 @@ impl Actor {
         }
         if line == DONE_ATC {
             self.state.tool_change = None;
+            if std::mem::take(&mut self.probe_on_after_atc) {
+                self.queue_line("M494.1".into());
+            }
         }
         if line == ABORTED {
             // `abort` leaves the job's modal state behind; a job that used G91 would leave the
@@ -695,12 +709,14 @@ impl Actor {
                 None => {
                     self.state.tool_change = target.map(|target| ToolChange {
                         target,
+                        remeasure: false,
                         phase: ToolChangePhase::Waiting,
                     });
                 }
             }
         } else if state == MachineState::Alarm {
             self.state.tool_change = None;
+            self.probe_on_after_atc = false;
         }
         if s.progress.is_some() {
             self.job_seen = true;
@@ -831,6 +847,7 @@ impl Actor {
         self.state.files = Files::default();
         self.state.job = None;
         self.state.tool_change = None;
+        self.probe_on_after_atc = false;
         self.state.outputs = None;
         self.state.batch = None;
         self.batch.clear();
@@ -1074,6 +1091,30 @@ impl Actor {
                 self.send_line("abort").await
             }
             Request::Probe { routine } => self.start_routine(routine),
+            Request::MapSurface { spec } => self.start_map(Some(spec)),
+            Request::ResumeMap => self.start_map(None),
+            Request::PauseMap => {
+                if !self.mapping {
+                    return Err(CoreError::Rejected("not mapping".into()));
+                }
+                self.map_pause.store(true, Ordering::Relaxed);
+                if let Some(r) = &mut self.state.probe.running {
+                    r.step = "Pausing after this point".into();
+                }
+                Ok(())
+            }
+            Request::DiscardMap => {
+                if self.mapping {
+                    return Err(CoreError::Rejected("the map is being measured".into()));
+                }
+                self.state.probe.map = None;
+                Ok(())
+            }
+            Request::ExportMap {
+                path,
+                format,
+                compensate,
+            } => self.export_map(&path, format, compensate),
             Request::CancelProbe => {
                 if self.routine.is_none() {
                     return Err(CoreError::Rejected("not probing".into()));
@@ -1131,6 +1172,8 @@ impl Actor {
                     s.slow_feed,
                     s.travel_feed,
                     s.z_search,
+                    s.stylus_length,
+                    s.body_diameter,
                 ];
                 if !positive.iter().all(|v| v.is_finite() && *v > 0.0)
                     || !(s.clearance.is_finite() && s.clearance >= 0.0)
@@ -1173,7 +1216,30 @@ impl Actor {
                 }
                 self.state.tool_change = Some(ToolChange {
                     target: tool,
+                    remeasure: false,
                     phase: ToolChangePhase::Moving,
+                });
+                Ok(())
+            }
+            Request::RemeasureTool => {
+                self.require(&[MachineState::Idle], "measure the tool")?;
+                let tool = match self.current_tool() {
+                    Some(LASER_TOOL) => {
+                        return Err(CoreError::Rejected(
+                            "the laser is measured when changing to it".into(),
+                        ));
+                    }
+                    Some(t) if t >= 0 => t,
+                    _ => return Err(CoreError::Rejected("no tool in to measure".into())),
+                };
+                self.send_line("M491").await?;
+                // The firmware's script switches the 3D probe off at the end; a change to it
+                // leaves it on, and routines expect that.
+                self.probe_on_after_atc = tool == PROBE_TOOL;
+                self.state.tool_change = Some(ToolChange {
+                    target: tool,
+                    phase: ToolChangePhase::Measuring,
+                    remeasure: true,
                 });
                 Ok(())
             }
@@ -1419,21 +1485,7 @@ impl Actor {
                 "the depth probe only measures Z; use the 3D probe for this".into(),
             ));
         }
-        // Before 1.1.3, changing to the probe didn't switch it on (docs/research/probing.md).
-        let firmware = self.state.machine.as_ref().and_then(|m| m.firmware.clone());
-        let version: Vec<u32> = firmware
-            .as_deref()
-            .unwrap_or_default()
-            .split('.')
-            .take(3)
-            .map(|p| p.parse().unwrap_or(0))
-            .collect();
-        if version < vec![1, 1, 3] {
-            return Err(CoreError::Rejected(format!(
-                "probing needs firmware 1.1.3 or newer (this machine has {})",
-                firmware.as_deref().unwrap_or("an unknown version")
-            )));
-        }
+        self.check_probing_firmware()?;
         let sizes: &[f64] = match &routine {
             probe::Routine::Surface => &[],
             probe::Routine::Edge { search, .. } => &[*search],
@@ -1467,6 +1519,122 @@ impl Actor {
         Ok(())
     }
 
+    /// Before 1.1.3, changing to the probe didn't switch it on (docs/research/probing.md).
+    fn check_probing_firmware(&self) -> Result<(), CoreError> {
+        let firmware = self.state.machine.as_ref().and_then(|m| m.firmware.clone());
+        let version: Vec<u32> = firmware
+            .as_deref()
+            .unwrap_or_default()
+            .split('.')
+            .take(3)
+            .map(|p| p.parse().unwrap_or(0))
+            .collect();
+        if version < vec![1, 1, 3] {
+            return Err(CoreError::Rejected(format!(
+                "probing needs firmware 1.1.3 or newer (this machine has {})",
+                firmware.as_deref().unwrap_or("an unknown version")
+            )));
+        }
+        Ok(())
+    }
+
+    /// A new surface map (`spec`), or carry on with the last one.
+    fn start_map(&mut self, spec: Option<map::MapSpec>) -> Result<(), CoreError> {
+        self.require(&[MachineState::Idle], "map")?;
+        // The depth probe only touches down, so it can't feel the part in the way of a move
+        // across: every move across is then at the top. It's switched on around the scan.
+        let lateral = match self.current_tool() {
+            Some(PROBE_TOOL) => true,
+            Some(DEPTH_PROBE_TOOL) => false,
+            _ => {
+                return Err(CoreError::Rejected(
+                    "put a probe in first (tool change to the 3D or depth probe)".into(),
+                ));
+            }
+        };
+        self.check_probing_firmware()?;
+        let z = self
+            .last_status
+            .as_ref()
+            .map(|s| s.machine_pos.0[2])
+            .ok_or_else(|| CoreError::Rejected("position unknown".into()))?;
+        let map = match spec {
+            Some(spec) => {
+                spec.check().map_err(CoreError::Rejected)?;
+                SurfaceMap::new(spec, z)
+            }
+            None => match &self.state.probe.map {
+                Some(m) if m.done < m.total() => m.clone(),
+                Some(_) => return Err(CoreError::Rejected("the map is complete".into())),
+                None => return Err(CoreError::Rejected("no map to carry on with".into())),
+            },
+        };
+        let io = self.routine_io();
+        let resuming = map.done > 0;
+        self.note(
+            ConsoleKind::Info,
+            format!(
+                "{} surface map: {} × {} points",
+                if resuming { "resuming" } else { "starting" },
+                map.spec.columns,
+                map.spec.rows
+            ),
+        );
+        self.state.probe.running = Some(RunningProbe {
+            label: "Surface map".into(),
+            step: "Starting".into(),
+        });
+        self.state.probe.contacts.clear();
+        self.state.probe.result = None;
+        self.state.probe.error = None;
+        self.state.probe.can_back_off = false;
+        self.state.probe.map = Some(map.clone());
+        self.back_off = None;
+        self.map_pause.store(false, Ordering::Relaxed);
+        self.mapping = true;
+        let pause = self.map_pause.clone();
+        self.spawn_routine(map::run(map, io, lateral, !lateral, pause));
+        Ok(())
+    }
+
+    fn export_map(
+        &mut self,
+        path: &str,
+        format: map::ExportFormat,
+        compensate: bool,
+    ) -> Result<(), CoreError> {
+        let m = self
+            .state
+            .probe
+            .map
+            .as_ref()
+            .ok_or_else(|| CoreError::Rejected("no map to export".into()))?;
+        // Work coordinates now, tool length included (machine − work from the last report).
+        let offset = self
+            .last_status
+            .as_ref()
+            .map(|s| [0, 1, 2].map(|i| s.machine_pos.0[i] - s.work_pos.0[i]))
+            .ok_or_else(|| {
+                CoreError::Rejected("position unknown, so no work coordinates".into())
+            })?;
+        let r = self.state.probe.settings.ball_diameter / 2.0;
+        let points: Vec<_> = map::surface(m, r, compensate)
+            .into_iter()
+            .map(|p| p.map(|p| [p[0] - offset[0], p[1] - offset[1], p[2] - offset[2]]))
+            .collect();
+        let count = points.iter().flatten().count();
+        if count == 0 {
+            return Err(CoreError::Rejected("the map has no points yet".into()));
+        }
+        std::fs::write(path, map::export(&m.spec, &points, format))
+            .map_err(|e| CoreError::Rejected(format!("couldn't write {path}: {e}")))?;
+        self.note(
+            ConsoleKind::Info,
+            format!("exported {count} map points to {path}"),
+        );
+        Ok(())
+    }
+
     /// The machine side for a new routine task; [`Self::spawn_routine`] connects it.
     fn routine_io(&mut self) -> probe::Io {
         let here = self
@@ -1492,6 +1660,7 @@ impl Actor {
     fn stop_routine(&mut self, error: Option<String>) {
         if let Some(r) = self.routine.take() {
             r.task.abort();
+            self.mapping = false;
             self.state.probe.running = None;
             self.state.probe.error = error;
             self.state.probe.can_back_off = self.back_off.is_some();
@@ -1515,6 +1684,68 @@ impl Actor {
                 }
             }
             Update::Contact(p) => self.state.probe.contacts.push(p),
+            Update::MapPoint {
+                index,
+                z,
+                limited,
+                secs,
+            } => {
+                if let Some(m) = &mut self.state.probe.map {
+                    m.z[index] = z;
+                    if limited {
+                        m.unreached.push(index as u32);
+                    }
+                    m.done += 1;
+                    m.secs += secs;
+                }
+            }
+            Update::MapDone(result) => {
+                self.routine = None;
+                self.mapping = false;
+                self.state.probe.running = None;
+                let Some(m) = &self.state.probe.map else {
+                    return;
+                };
+                match result {
+                    Ok(true) => {
+                        let zs: Vec<f64> = m.z.iter().flatten().copied().collect();
+                        let lo = zs.iter().copied().fold(f64::INFINITY, f64::min);
+                        let hi = zs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                        let unreached = m.unreached.len();
+                        let missed = m.z.len() - zs.len() - unreached;
+                        let range = if zs.is_empty() {
+                            "nothing found".into()
+                        } else {
+                            format!("Z range {:.3}", hi - lo)
+                        };
+                        let mut missed = if missed > 0 {
+                            format!(", {missed} without contact")
+                        } else {
+                            String::new()
+                        };
+                        if unreached > 0 {
+                            missed += &format!(", {unreached} out of the stylus' reach");
+                        }
+                        self.note(
+                            ConsoleKind::Info,
+                            format!("surface map done: {} points, {range}{missed}", m.z.len()),
+                        );
+                    }
+                    Ok(false) => {
+                        let text = format!(
+                            "surface map paused after {} of {} points",
+                            m.done,
+                            m.total()
+                        );
+                        self.note(ConsoleKind::Info, text);
+                    }
+                    Err(e) => {
+                        self.note(ConsoleKind::Error, format!("mapping stopped: {e}"));
+                        self.state.probe.error = Some(e);
+                        self.state.probe.can_back_off = self.back_off.is_some();
+                    }
+                }
+            }
             Update::BackOff(dir) => self.back_off = Some(dir),
             Update::Recovered(result) => {
                 self.routine = None;

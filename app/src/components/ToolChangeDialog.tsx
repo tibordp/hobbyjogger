@@ -32,7 +32,7 @@ export function ToolChangeDialog() {
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            {tc.phase === "waiting" ? `Insert ${the}` : `Changing to ${the}`}
+            {tc.remeasure ? `Remeasuring ${the}` : tc.phase === "waiting" ? `Insert ${the}` : `Changing to ${the}`}
           </AlertDialogTitle>
           <AlertDialogDescription>
             {inJob && "The job is waiting for a tool change. "}
