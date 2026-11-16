@@ -213,3 +213,20 @@ the measured surface, estimated from its neighbours (the ball touches a slope of
 the raw tip reads high there). The simulator has a sloped plate with a spherical dome for this.
 The frontend has the same correction (`surfacePoints` in `app/src/lib/surfaceMap.ts`) for showing
 the map, so what's shown matches what's exported; the two must be kept in step.
+
+### Contours
+
+A contour (`hj_core::contour`) traces a closed wall at the height the 3D probe was jogged to, in
+the same routine slot: outside a part (from beside it, toward the middle of a box drawn around
+it, which the trace mustn't leave) or inside a pocket (from within it, toward its −Y wall). It
+walks round with the material on its left, so outside contours come out counter-clockwise and
+inside ones clockwise. Each step stands off from the last touch by enough for the wall to bend
+back toward the probe no tighter than the given radius (s² / 2(R − r) for the ball's centre, plus a
+margin), steps along by the spacing and probes back toward the wall. A touch on the step along
+means the wall bent in sooner; no touch means it bent away: the step is halved, retracing the path
+each time, until it's within about a ball radius of the corner, then it swings back toward the last
+touch (aimed a little into the material) to find the face round it. It's done back by the first
+touch with a full turn behind it, and fails if it leaves the box or passes 5000 points. Points are
+ball centres; compensation moves each a ball radius toward the material, square to the line through
+its neighbours (`contour::wall`, mirrored in `app/src/lib/contour.ts`). Export is CSV/TSV or an R12
+DXF with one closed polyline, in work coordinates, at the height the ball touched the wall.

@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::contour::{Contour, ContourSpec};
 use crate::map::{ExportFormat, MapSpec, SurfaceMap};
 use crate::probe::{ProbeResult, ProbeSettings, Routine};
 
@@ -114,6 +115,8 @@ pub struct ProbeState {
     pub can_back_off: bool,
     /// The surface map being measured, or the last one.
     pub map: Option<SurfaceMap>,
+    /// The contour being traced, or the last one.
+    pub contour: Option<Contour>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, TS)]
@@ -561,6 +564,20 @@ pub enum Request {
     PauseMap,
     /// Forget the map.
     DiscardMap,
+    /// Trace a closed contour at the current height with the 3D probe, from where it is: outside a
+    /// part (within `spec`'s box) or inside a pocket. Replaces the last contour.
+    TraceContour {
+        spec: ContourSpec,
+    },
+    /// Forget the contour.
+    DiscardContour,
+    /// Write the contour to `path` in work coordinates: CSV, TSV or DXF. With `compensate`, on the
+    /// wall rather than where the ball's centre was ([`crate::contour::wall`]).
+    ExportContour {
+        path: String,
+        format: ExportFormat,
+        compensate: bool,
+    },
     /// Write the map to `path` in work coordinates. With `compensate`, corrected for the ball
     /// touching slopes off its bottom ([`crate::map::surface`]).
     ExportMap {

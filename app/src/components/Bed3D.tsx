@@ -9,6 +9,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { Analysis } from "@/bindings/Analysis";
 import type { SurfaceMap } from "@/bindings/SurfaceMap";
 import { Button } from "@/components/ui/button";
+import { wallPoints, type V2 } from "@/lib/contour";
 import { useConnected, useJobRunning } from "@/lib/machine";
 import { useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
@@ -52,6 +53,7 @@ function themeColors() {
     highlight: cssColor("#fde047"), // yellow-300
     tool: cssColor("#38bdf8"), // sky-400
     contact: cssColor("#7dd3fc"), // sky-300
+    contour: cssColor("#34d399"), // emerald-400, as in 2D
     x: cssColor("#f87171"),
     y: cssColor("#4ade80"),
     z: cssColor("#60a5fa"),
@@ -211,6 +213,15 @@ export default function Bed3D() {
   const ball = probe?.settings.ballDiameter ?? 0;
   const surfacePts = useMemo(() => (surfaceMap ? surfacePoints(surfaceMap, ball / 2, compensate) : []), [surfaceMap, ball, compensate]);
   useEffect(() => api?.setSurface(surfaceMap, surfacePts), [api, surfaceMap, surfacePts]);
+  const contour = probe?.contour ?? null;
+  const contourPts = useMemo(() => {
+    if (!contour) return null;
+    // At the height the ball touched the wall: its centre, a radius above the tip.
+    const z = contour.z + ball / 2;
+    return wallPoints(contour.points as V2[], ball / 2, compensate, contour.closed).map(([x, y]) => [x, y, z] as Vec3);
+  }, [contour, ball, compensate]);
+  const contourClosed = contour?.closed ?? false;
+  useEffect(() => api?.setContour(contourPts, contourClosed), [api, contourPts, contourClosed]);
   useEffect(() => api?.setPerspective(perspective), [api, perspective]);
 
   // Frame the program when one appears (or the bed, without), from the angle.
@@ -345,7 +356,8 @@ function setup(el: HTMLDivElement) {
   let tool: THREE.Group | null = null;
   let contacts: THREE.Points | null = null;
   const surface = new THREE.Group();
-  scene.add(surface);
+  const outline = new THREE.Group();
+  scene.add(surface, outline);
 
   const clear = (g: THREE.Object3D) => {
     for (const c of [...g.children]) {
@@ -514,6 +526,19 @@ function setup(el: HTMLDivElement) {
       }
       render();
     },
+    /** A contour: its points, joined (round, once closed). */
+    setContour(points: Vec3[] | null, closed: boolean) {
+      clear(outline);
+      if (points && points.length > 0) {
+        const dots = new THREE.BufferGeometry();
+        dots.setAttribute("position", new THREE.Float32BufferAttribute(points.flat(), 3));
+        outline.add(new THREE.Points(dots, new THREE.PointsMaterial({ color: colors.contour, size: 4, sizeAttenuation: false })));
+        const line = new THREE.BufferGeometry();
+        line.setAttribute("position", new THREE.Float32BufferAttribute((closed ? [...points, points[0]] : points).flat(), 3));
+        outline.add(new THREE.Line(line, new THREE.LineBasicMaterial({ color: colors.contour })));
+      }
+      render();
+    },
     setPerspective(on: boolean) {
       const next = on ? persp : ortho;
       if (next === camera) return;
@@ -548,7 +573,7 @@ function setup(el: HTMLDivElement) {
       ro.disconnect();
       controls.dispose();
       for (const p of paths) p.dispose();
-      for (const g of [bedGroup, origin, program, marks, surface]) clear(g);
+      for (const g of [bedGroup, origin, program, marks, surface, outline]) clear(g);
       for (const m of [feed, feedDone, rapid, rapidDone, highlight]) m.dispose();
       renderer.dispose();
       renderer.domElement.remove();

@@ -9,6 +9,7 @@ import type { Side } from "@/bindings/Side";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field } from "@/components/Field";
+import { ContourTab } from "@/components/ContourTab";
 import { MapTab } from "@/components/MapTab";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { act } from "@/lib/actions";
@@ -17,14 +18,21 @@ import { useStore } from "@/lib/store";
 import { routineOf, setProbeForm, useUi, type ProbeForm, type ProbeKind } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
-const KINDS: { kind: ProbeKind; label: string }[] = [
-  { kind: "surface", label: "Surface" },
-  { kind: "edge", label: "Edge" },
-  { kind: "corner", label: "Corner" },
-  { kind: "bore", label: "Bore" },
-  { kind: "boss", label: "Boss" },
-  { kind: "map", label: "Map" },
+/** Single-shot routines, then the scans: one control over two rows, as one row doesn't fit them. */
+const KIND_ROWS: { kind: ProbeKind; label: string; title?: string }[][] = [
+  [
+    { kind: "surface", label: "Surface" },
+    { kind: "edge", label: "Edge" },
+    { kind: "corner", label: "Corner" },
+    { kind: "bore", label: "Bore" },
+    { kind: "boss", label: "Boss" },
+  ],
+  [
+    { kind: "map", label: "Surface map", title: "Heights over an area, as points or a mesh" },
+    { kind: "contour", label: "Contour", title: "A closed outline at one height, inside or out" },
+  ],
 ];
+const KINDS = KIND_ROWS.flat();
 
 // ---- diagrams (top view, front at the bottom, except the surface's side view) ----
 
@@ -174,6 +182,7 @@ function instructions(f: ProbeForm) {
         ? "Jog the probe above the boss, roughly over its centre."
         : `Jog the probe above the boss or web, roughly over its middle. It finds the centreline across ${f.across.toUpperCase()}.`;
     case "map":
+    case "contour":
       return "";
   }
 }
@@ -297,10 +306,11 @@ export function ProbePanel() {
   // Maps only touch down too, but cross at the top with the depth probe (it can't feel the part
   // in the way).
   const canProbe = hasProbe || (depthOnly && (form.kind === "surface" || form.kind === "map"));
+  // Contours need to feel sideways: the 3D probe only (covered by hasProbe).
   const running = probe?.running ?? null;
   const idle = connected && state === "idle" && !job && !changing && !running;
   // Nothing to show but how to get a probe in.
-  const collapsed = !hasProbe && !depthOnly && !running && !probe?.error && !probe?.result && !probe?.map;
+  const collapsed = !hasProbe && !depthOnly && !running && !probe?.error && !probe?.result && !probe?.map && !probe?.contour;
 
   if (collapsed) {
     return (
@@ -345,24 +355,38 @@ export function ProbePanel() {
           </div>
         )}
 
+        {/* A 10-column grid (routines span 2, scans 5); the 1 px gaps show the border colour
+            behind, so the inner borders are flat and only the outer corners round. */}
         <ToggleGroup
           type="single"
-          variant="outline"
           size="sm"
           spacing={0}
-          className="w-full"
+          className="grid w-full grid-cols-10 gap-px overflow-hidden rounded-md border border-input bg-input"
           value={form.kind}
           onValueChange={(kind) => kind && setProbeForm({ kind: kind as ProbeKind })}
         >
-          {KINDS.map((k) => (
-            <ToggleGroupItem key={k.kind} value={k.kind} className="flex-1 text-xs">
-              {k.label}
-            </ToggleGroupItem>
-          ))}
+          {KIND_ROWS.map((row) =>
+            row.map((k) => (
+              <ToggleGroupItem
+                key={k.kind}
+                value={k.kind}
+                title={k.title}
+                className={cn(
+                  // Important: the group rounds its first and last items with more specific selectors.
+                  "rounded-none! bg-card text-xs hover:bg-muted data-[state=on]:bg-muted",
+                  row.length === 2 ? "col-span-5" : "col-span-2",
+                )}
+              >
+                {k.label}
+              </ToggleGroupItem>
+            )),
+          )}
         </ToggleGroup>
 
         {form.kind === "map" ? (
           <MapTab canStart={idle && canProbe} />
+        ) : form.kind === "contour" ? (
+          <ContourTab canStart={idle && hasProbe} />
         ) : (
           <div className="flex gap-3">
             <Diagram form={form} />
@@ -419,7 +443,7 @@ export function ProbePanel() {
             </Button>
           </div>
         ) : (
-          form.kind !== "map" && (
+          form.kind !== "map" && form.kind !== "contour" && (
             <Button className="w-full" disabled={!idle || !canProbe} onClick={() => act({ type: "probe", routine: routineOf(form) })}>
               <CircleDot /> Probe {KINDS.find((k) => k.kind === form.kind)!.label.toLowerCase()}
             </Button>

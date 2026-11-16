@@ -1562,3 +1562,143 @@ async fn maps_the_dome_adaptively() {
         }
     }
 }
+
+#[tokio::test]
+async fn traces_outside_and_inside_contours() {
+    use hj_core::contour::{ContourSpec, wall};
+    use hj_core::map::ExportFormat;
+    use hj_sim::{BALL_RADIUS, BORE_CENTER, BORE_DIAMETER, PART_MAX, PART_MIN};
+
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    core.request(Request::Mdi {
+        line: "M493.2 T9999".into(),
+    })
+    .await
+    .unwrap();
+    core.request(Request::SetProbeSettings {
+        settings: hj_core::probe::ProbeSettings {
+            fast_feed: 1200.0,
+            slow_feed: 300.0,
+            travel_feed: 2400.0,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    let goto = |x: f64, y: f64, z: f64| Request::Mdi {
+        line: format!("G53 G0 Z-40\nG53 G0 X{x} Y{y}\nG53 G0 Z{z}"),
+    };
+    let at = |x: f64, y: f64| {
+        move |m: &Mirror| {
+            state_of(m) == Some("idle")
+                && m.state.as_ref().unwrap()["batch"].is_null()
+                && m.telemetry.as_ref().is_some_and(|t| {
+                    (t.machine[0] - x).abs() < 1e-6
+                        && (t.machine[1] - y).abs() < 1e-6
+                        && (t.machine[2] + 65.0).abs() < 1e-6
+                })
+        }
+    };
+    let finished = |m: &Mirror| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["running"].is_null() && (p["contour"]["closed"] == true || !p["error"].is_null())
+    };
+    let points = |p: &serde_json::Value| -> Vec<[f64; 2]> {
+        p["contour"]["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| [v[0].as_f64().unwrap(), v[1].as_f64().unwrap()])
+            .collect()
+    };
+    // Shoelace: positive counter-clockwise.
+    let area = |pts: &[[f64; 2]]| {
+        (0..pts.len())
+            .map(|i| {
+                let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            / 2.0
+    };
+
+    // Outside the block, 5 mm below its top: in front of it, with a box around it.
+    core.request(goto(-125.0, -158.0, -65.0)).await.unwrap();
+    until(&sink, "in front of the block", at(-125.0, -158.0)).await;
+    core.request(Request::TraceContour {
+        spec: ContourSpec {
+            inside: false,
+            min: [-160.0, -160.0],
+            max: [-90.0, -100.0],
+            spacing: 8.0,
+            radius: 5.0,
+            search: 0.0,
+        },
+    })
+    .await
+    .unwrap();
+    until_for(&sink, "outside traced", 180, finished).await;
+    let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(probe["error"].is_null(), "{probe}");
+    let outside = wall(&points(&probe), BALL_RADIUS, true);
+    // Counter-clockwise, round the block's 50 × 40 mm.
+    let a = area(&outside);
+    assert!((a - 2000.0).abs() < 2.0, "area {a}");
+    // Each point on the block's edge (corners come out a little inside the true corner).
+    for p in &outside {
+        let dx = (p[0] - PART_MIN[0]).abs().min((p[0] - PART_MAX[0]).abs());
+        let dy = (p[1] - PART_MIN[1]).abs().min((p[1] - PART_MAX[1]).abs());
+        assert!(dx.min(dy) < 0.35, "off the edge: {p:?}");
+    }
+
+    // Inside the bore, from its middle.
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    core.request(goto(BORE_CENTER[0], BORE_CENTER[1], -65.0))
+        .await
+        .unwrap();
+    until(&sink, "in the bore", at(BORE_CENTER[0], BORE_CENTER[1])).await;
+    core.request(Request::TraceContour {
+        spec: ContourSpec {
+            inside: true,
+            min: [0.0, 0.0],
+            max: [0.0, 0.0],
+            spacing: 3.0,
+            radius: BORE_DIAMETER / 2.0,
+            search: 20.0,
+        },
+    })
+    .await
+    .unwrap();
+    until_for(&sink, "inside traced", 180, finished).await;
+    let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(probe["error"].is_null(), "{probe}");
+    let inside = wall(&points(&probe), BALL_RADIUS, true);
+    // Clockwise, on the bore's wall.
+    assert!(area(&inside) < 0.0);
+    for p in &inside {
+        let r = (p[0] - BORE_CENTER[0]).hypot(p[1] - BORE_CENTER[1]);
+        assert!(
+            (r - BORE_DIAMETER / 2.0).abs() < 0.05,
+            "radius {r} at {p:?}"
+        );
+    }
+
+    let dxf = std::env::temp_dir().join(format!("hj-contour-{}.dxf", std::process::id()));
+    core.request(Request::ExportContour {
+        path: dxf.to_string_lossy().into(),
+        format: ExportFormat::Dxf,
+        compensate: true,
+    })
+    .await
+    .unwrap();
+    let text = std::fs::read_to_string(&dxf).unwrap();
+    assert_eq!(text.matches("VERTEX").count(), inside.len());
+    std::fs::remove_file(&dxf).unwrap();
+}

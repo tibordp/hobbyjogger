@@ -21,6 +21,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use ts_rs::TS;
 
+use crate::contour::{self, Contour};
 use crate::map::{self, SurfaceMap};
 use crate::probe::{self, Update};
 use crate::settings;
@@ -1103,6 +1104,21 @@ impl Actor {
                 }
                 Ok(())
             }
+            Request::TraceContour { spec } => self.start_contour(spec),
+            Request::DiscardContour => {
+                if self.routine.is_some()
+                    && self.state.probe.contour.as_ref().is_some_and(|c| !c.closed)
+                {
+                    return Err(CoreError::Rejected("the contour is being traced".into()));
+                }
+                self.state.probe.contour = None;
+                Ok(())
+            }
+            Request::ExportContour {
+                path,
+                format,
+                compensate,
+            } => self.export_contour(&path, format, compensate),
             Request::DiscardMap => {
                 if self.mapping {
                     return Err(CoreError::Rejected("the map is being measured".into()));
@@ -1602,6 +1618,100 @@ impl Actor {
         Ok(())
     }
 
+    /// A contour from where the 3D probe is, at its height.
+    fn start_contour(&mut self, spec: contour::ContourSpec) -> Result<(), CoreError> {
+        self.require(&[MachineState::Idle], "trace")?;
+        if self.current_tool() != Some(PROBE_TOOL) {
+            return Err(CoreError::Rejected(
+                "tracing needs the 3D probe (the depth probe only feels down)".into(),
+            ));
+        }
+        self.check_probing_firmware()?;
+        spec.check().map_err(CoreError::Rejected)?;
+        let z = self
+            .last_status
+            .as_ref()
+            .map(|s| s.machine_pos.0[2])
+            .ok_or_else(|| CoreError::Rejected("position unknown".into()))?;
+        let io = self.routine_io();
+        self.note(
+            ConsoleKind::Info,
+            format!(
+                "tracing {} contour at Z{z:.3}",
+                if spec.inside {
+                    "an inside"
+                } else {
+                    "an outside"
+                }
+            ),
+        );
+        self.state.probe.running = Some(RunningProbe {
+            label: if spec.inside {
+                "Inside contour"
+            } else {
+                "Outside contour"
+            }
+            .into(),
+            step: "Starting".into(),
+        });
+        self.state.probe.contacts.clear();
+        self.state.probe.result = None;
+        self.state.probe.error = None;
+        self.state.probe.can_back_off = false;
+        self.state.probe.contour = Some(Contour {
+            spec: spec.clone(),
+            z,
+            points: vec![],
+            closed: false,
+        });
+        self.back_off = None;
+        self.spawn_routine(contour::run(spec, io));
+        Ok(())
+    }
+
+    fn export_contour(
+        &mut self,
+        path: &str,
+        format: map::ExportFormat,
+        compensate: bool,
+    ) -> Result<(), CoreError> {
+        let c = self
+            .state
+            .probe
+            .contour
+            .as_ref()
+            .ok_or_else(|| CoreError::Rejected("no contour to export".into()))?;
+        if !c.closed {
+            return Err(CoreError::Rejected("the contour isn't closed".into()));
+        }
+        if format == map::ExportFormat::Stl {
+            return Err(CoreError::Rejected(
+                "a contour exports as DXF, CSV or TSV".into(),
+            ));
+        }
+        let offset = self
+            .last_status
+            .as_ref()
+            .map(|s| [0, 1, 2].map(|i| s.machine_pos.0[i] - s.work_pos.0[i]))
+            .ok_or_else(|| {
+                CoreError::Rejected("position unknown, so no work coordinates".into())
+            })?;
+        let r = self.state.probe.settings.ball_diameter / 2.0;
+        let points: Vec<[f64; 2]> = contour::wall(&c.points, r, compensate)
+            .into_iter()
+            .map(|[x, y]| [x - offset[0], y - offset[1]])
+            .collect();
+        // Where the ball touched the wall: its centre, a radius above the tip.
+        let z = c.z + r - offset[2];
+        std::fs::write(path, contour::export(&points, z, format))
+            .map_err(|e| CoreError::Rejected(format!("couldn't write {path}: {e}")))?;
+        self.note(
+            ConsoleKind::Info,
+            format!("exported a {}-point contour to {path}", points.len()),
+        );
+        Ok(())
+    }
+
     fn export_map(
         &mut self,
         path: &str,
@@ -1627,6 +1737,11 @@ impl Actor {
             .into_iter()
             .map(|p| p.map(|p| [p[0] - offset[0], p[1] - offset[1], p[2] - offset[2]]))
             .collect();
+        if format == map::ExportFormat::Dxf {
+            return Err(CoreError::Rejected(
+                "a map exports as STL, CSV or TSV".into(),
+            ));
+        }
         let count = points.iter().flatten().count();
         if count == 0 {
             return Err(CoreError::Rejected("the map has no points yet".into()));
@@ -1707,6 +1822,34 @@ impl Actor {
                     m.probed.push(index as u32);
                     m.pending = m.pending.saturating_sub(1);
                     m.secs += secs;
+                }
+            }
+            Update::ContourPoint(p) => {
+                if let Some(c) = &mut self.state.probe.contour {
+                    c.points.push(p);
+                }
+            }
+            Update::ContourDone(result) => {
+                self.routine = None;
+                self.state.probe.running = None;
+                let n = self
+                    .state
+                    .probe
+                    .contour
+                    .as_ref()
+                    .map_or(0, |c| c.points.len());
+                match result {
+                    Ok(()) => {
+                        if let Some(c) = &mut self.state.probe.contour {
+                            c.closed = true;
+                        }
+                        self.note(ConsoleKind::Info, format!("contour closed: {n} points"));
+                    }
+                    Err(e) => {
+                        self.note(ConsoleKind::Error, format!("tracing stopped: {e}"));
+                        self.state.probe.error = Some(e);
+                        self.state.probe.can_back_off = self.back_off.is_some();
+                    }
                 }
             }
             Update::MapPending(n) => {

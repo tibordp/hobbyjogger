@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ZBar } from "@/components/ZBar";
 import { act } from "@/lib/actions";
+import { plannedContour, wallPoints, type V2 } from "@/lib/contour";
 import { canJog, isProbe, useConnected, useJobRunning, useMachineState, useStatus, useWorkOffset } from "@/lib/machine";
 import { fitProblems, useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
@@ -78,6 +79,9 @@ function pathData(a: Analysis, from: number, to: number, map: (x: number, y: num
   }
   return { rapid: out.rapid.join(""), feed: out.feed.join("") };
 }
+
+/** A map point (lattice index) or a contour point (index round it), for hover and its menu. */
+type Target = { kind: "map" | "contour"; i: number };
 
 /** Machine X or Y to the drawing's units (mm). */
 type ToSvg = (v: number) => number;
@@ -269,7 +273,8 @@ export function BedView() {
   const probeForm = useUi((s) => s.probe);
   const surfaceMap = probe?.map ?? null;
   // On the Map tab, dragging picks the area to map (in machine coordinates while dragging).
-  const picking = probeForm.kind === "map" && connected && !probe?.running;
+  const picking =
+    (probeForm.kind === "map" || (probeForm.kind === "contour" && !probeForm.contourInside)) && connected && !probe?.running;
   const [drag, setDrag] = useState<{ from: Point; to: Point; moved: boolean } | null>(null);
   const dragged = useRef(false);
   const progress = status?.job ?? null;
@@ -373,7 +378,7 @@ export function BedView() {
       const box = area.current?.getBoundingClientRect();
       if (!box) return;
       e.preventDefault();
-      setPointMenu({ i: hoverPoint, left: e.clientX - box.left, top: e.clientY - box.top });
+      setPointMenu({ target: hoverPoint, left: e.clientX - box.left, top: e.clientY - box.top });
       return;
     }
     const p = toMachine(e);
@@ -439,7 +444,9 @@ export function BedView() {
       const w = (v: number, i: number) => Math.round((v - offset[i]) * 10) / 10;
       const [ax, bx] = [w(drag.from.x, 0), w(drag.to.x, 0)].sort((a, b) => a - b);
       const [ay, by] = [w(drag.from.y, 1), w(drag.to.y, 1)].sort((a, b) => a - b);
-      if (bx > ax && by > ay) setProbeForm({ mapMin: [ax, ay], mapMax: [bx, by] });
+      if (bx > ax && by > ay) {
+        setProbeForm(probeForm.kind === "contour" ? { contourMin: [ax, ay], contourMax: [bx, by] } : { mapMin: [ax, ay], mapMax: [bx, by] });
+      }
       dragged.current = true;
     }
     setDrag(null);
@@ -497,7 +504,8 @@ export function BedView() {
     const p = pathData(analysis, from, to, preview.map);
     return p.rapid + p.feed;
   }, [preview, analysis, cursorLine]);
-  const plan = picking && offset ? plannedSpec(probeForm, [offset[0], offset[1]]) : null;
+  const plan = picking && offset && probeForm.kind === "map" ? plannedSpec(probeForm, [offset[0], offset[1]]) : null;
+  const contourBox = picking && offset && probeForm.kind === "contour" ? plannedContour(probeForm, [offset[0], offset[1]]) : null;
   // Drawn again only when the map changes, not with every position report: a map can be thousands
   // of points.
   const compensate = useUi((s) => s.mapCompensate);
@@ -509,23 +517,41 @@ export function BedView() {
       surfaceMap && <MeasuredMap map={surfaceMap} probed={mapProbed} points={mapPoints} sx={(x) => x - minX} sy={(y) => maxY - y} k={k} />,
     [surfaceMap, mapProbed, mapPoints, minX, maxY, k],
   );
-  // The map point under the pointer (within a few pixels), once probed: highlighted, with its
+  const contour = probe?.contour ?? null;
+  const contourWall = useMemo(
+    () => (contour ? wallPoints(contour.points as V2[], ball / 2, compensate, contour.closed) : []),
+    [contour, ball, compensate],
+  );
+  // The map or contour point under the pointer (within a few pixels): highlighted, with its
   // coordinates, and a click on it opens its own menu.
-  const hoverPoint = useMemo(() => {
-    if (!surfaceMap || !hover || drag) return null;
-    return nearestPoint(surfaceMap, mapProbed, mapPoints, hover.x, hover.y, 8 * k);
-  }, [surfaceMap, mapProbed, mapPoints, hover, drag, k]);
-  /** A map point's machine position: the surface point, or the grid point where there's none. */
-  const pointPos = (i: number): [number, number, number | null] => {
-    const p = mapPoints[i];
-    if (p) return p;
-    const [x, y] = pointAt(surfaceMap!.spec, i);
+  const hoverPoint = useMemo((): Target | null => {
+    if (!hover || drag) return null;
+    const radius = 8 * k;
+    let best: Target | null = null;
+    let bestD = radius;
+    contourWall.forEach(([x, y], i) => {
+      const d = Math.hypot(x - hover.x, y - hover.y);
+      if (d <= bestD) [best, bestD] = [{ kind: "contour", i }, d];
+    });
+    if (best || !surfaceMap) return best;
+    const i = nearestPoint(surfaceMap, mapProbed, mapPoints, hover.x, hover.y, radius);
+    return i === null ? null : { kind: "map", i };
+  }, [surfaceMap, mapProbed, mapPoints, contourWall, hover, drag, k]);
+  /** A point's machine position. A map's: the surface point, or the grid point where there's none.
+   * A contour's: on the wall (or where the ball's centre was), and no Z: it's a wall. */
+  const pointPos = (p: Target): [number, number, number | null] => {
+    if (p.kind === "contour") return [...contourWall[p.i], null];
+    const q = mapPoints[p.i];
+    if (q) return q;
+    const [x, y] = pointAt(surfaceMap!.spec, p.i);
     return [x, y, null];
   };
   const workOffset = useWorkOffset();
   /** "Point 3, 5" (grid column, row from the front left), and what became of it if there's no
-   * surface. */
-  const pointLabel = (i: number) => {
+   * surface; or "Contour point 12". */
+  const pointLabel = (p: Target) => {
+    if (p.kind === "contour") return `Contour point ${p.i + 1}`;
+    const i = p.i;
     const m = surfaceMap!;
     const what = mapPoints[i] ? "" : m.unreached.includes(i) ? " · out of the stylus' reach" : " · no contact";
     // In grid units: refined points fall between grid points.
@@ -534,7 +560,7 @@ export function BedView() {
     const g = (v: number) => String(+(v / s + 1).toFixed(3));
     return `Point ${g(i % cols)}, ${g(Math.floor(i / cols))}${what}`;
   };
-  const [pointMenu, setPointMenu] = useState<{ i: number; left: number; top: number } | null>(null);
+  const [pointMenu, setPointMenu] = useState<{ target: Target; left: number; top: number } | null>(null);
   const problems =
     analysis && offset && travel ? fitProblems(analysis, offset, travel) : [];
 
@@ -639,7 +665,7 @@ export function BedView() {
                 </DropdownMenuContent>
               )}
             </DropdownMenu>
-            {surfaceMap && hoverPoint !== null && !pointMenu && (
+            {hoverPoint !== null && !pointMenu && (
               <PointTip
                 label={pointLabel(hoverPoint)}
                 pos={pointPos(hoverPoint)}
@@ -652,8 +678,8 @@ export function BedView() {
               <DropdownMenuTrigger asChild>
                 <span className="pointer-events-none absolute size-0" style={{ left: pointMenu?.left ?? 0, top: pointMenu?.top ?? 0 }} />
               </DropdownMenuTrigger>
-              {pointMenu && surfaceMap && (() => {
-                const [x, y, z] = pointPos(pointMenu.i);
+              {pointMenu && (() => {
+                const [x, y, z] = pointPos(pointMenu.target);
                 const coords = (o: readonly number[]) =>
                   `X${(x - o[0]).toFixed(3)} Y${(y - o[1]).toFixed(3)}${z !== null ? ` Z${(z - o[2]).toFixed(3)}` : ""}`;
                 const copy = (text: string) =>
@@ -664,7 +690,7 @@ export function BedView() {
                 return (
                   <DropdownMenuContent align="start" sideOffset={6} className="min-w-60">
                     <DropdownMenuLabel className="font-mono text-xs font-normal">
-                      <div className="font-sans font-medium">{pointLabel(pointMenu.i)}</div>
+                      <div className="font-sans font-medium">{pointLabel(pointMenu.target)}</div>
                       {workOffset && <div>W {coords(workOffset)}</div>}
                       <div className="text-muted-foreground">M {coords([0, 0, 0])}</div>
                     </DropdownMenuLabel>
@@ -751,6 +777,29 @@ export function BedView() {
               return <circle cx={sx(x)} cy={sy(y)} r={6 * k} fill="none" className="pointer-events-none stroke-sky-300" strokeWidth={1.5 * k} />;
             })()}
             {plan && !drag?.moved && <PlannedMap spec={plan} dots={!surfaceMap?.probed.length} sx={sx} sy={sy} k={k} />}
+            {contourBox && !drag?.moved && (
+              <rect
+                x={sx(contourBox.min[0])}
+                y={sy(contourBox.max[1])}
+                width={contourBox.max[0] - contourBox.min[0]}
+                height={contourBox.max[1] - contourBox.min[1]}
+                className="pointer-events-none fill-sky-400/5 stroke-sky-400/70"
+                strokeWidth={k}
+                strokeDasharray={`${4 * k} ${3 * k}`}
+              />
+            )}
+            {contour && contourWall.length > 0 && (
+              <g className="pointer-events-none">
+                {contourWall.length > 1 &&
+                  (() => {
+                    const d = contourWall.map(([x, y], i) => `${i ? "L" : "M"}${sx(x)} ${sy(y)}`).join("") + (contour.closed ? "Z" : "");
+                    return <path d={d} fill="none" className="stroke-emerald-400" strokeWidth={1.5 * k} strokeLinejoin="round" />;
+                  })()}
+                {contourWall.map(([x, y], i) => (
+                  <circle key={i} cx={sx(x)} cy={sy(y)} r={2 * k} className="fill-emerald-300" />
+                ))}
+              </g>
+            )}
             {drag?.moved && (
               <rect
                 x={sx(Math.min(drag.from.x, drag.to.x))}

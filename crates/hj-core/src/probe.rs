@@ -219,6 +219,10 @@ pub(crate) enum Update {
         limited: bool,
         secs: f64,
     },
+    /// A contour's next touch: where the ball's centre was, X/Y.
+    ContourPoint([f64; 2]),
+    /// A contour finished (closed), or why it stopped.
+    ContourDone(std::result::Result<(), String>),
     /// A surface map planned this many points to probe next.
     MapPending(u32),
     /// A surface map scan stopped: whether it finished (rather than paused), or why it failed.

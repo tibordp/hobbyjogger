@@ -6,8 +6,8 @@ import type { Corner } from "@/bindings/Corner";
 import type { Routine } from "@/bindings/Routine";
 import type { Side } from "@/bindings/Side";
 
-/** A routine, or a surface map (which isn't one: it runs long and keeps its points). */
-export type ProbeKind = Routine["kind"] | "map";
+/** A routine, or a surface map or contour (which aren't: they run long and keep their points). */
+export type ProbeKind = Routine["kind"] | "map" | "contour";
 
 /** The probing form, kept between uses (and shown as a preview on the bed). */
 export interface ProbeForm {
@@ -39,6 +39,17 @@ export interface ProbeForm {
   mapLevels: number;
   /** Map, adaptive: how far a cell's centre may be from its corners' average before it's split, mm. */
   mapTolerance: number;
+  /** Contour: a pocket's wall from inside, rather than a part's outline from outside. */
+  contourInside: boolean;
+  /** Contour, outside: the box around the part, work X/Y; null until picked. */
+  contourMin: [number, number] | null;
+  contourMax: [number, number] | null;
+  /** Contour: between touches along the wall, mm. */
+  contourSpacing: number;
+  /** Contour: the tightest the wall bends toward the probe, mm. */
+  contourRadius: number;
+  /** Contour, inside: how far to look for the front wall, mm. */
+  contourSearch: number;
 }
 
 export type MapView = "2d" | "3d";
@@ -94,6 +105,12 @@ export const useUi = create<Ui>(() => ({
     mapAdaptive: false,
     mapLevels: 3,
     mapTolerance: 0.05,
+    contourInside: false,
+    contourMin: null,
+    contourMax: null,
+    contourSpacing: 2,
+    contourRadius: 3,
+    contourSearch: 30,
   },
 }));
 
@@ -105,7 +122,8 @@ export function setProbeForm(patch: Partial<ProbeForm>) {
 export function routineOf(f: ProbeForm): Routine {
   switch (f.kind) {
     case "map":
-      throw new Error("a map isn't a routine");
+    case "contour":
+      throw new Error(`a ${f.kind} isn't a routine`);
     case "surface":
       return { kind: "surface" };
     case "edge":

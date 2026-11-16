@@ -3,4 +3,4 @@
 /**
  * What to write a map or contour as.
  */
-export type ExportFormat = "csv" | "tsv" | "stl";
+export type ExportFormat = "csv" | "tsv" | "stl" | "dxf";

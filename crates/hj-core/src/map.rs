@@ -609,6 +609,8 @@ pub enum ExportFormat {
     Tsv,
     /// Binary STL: the grid as a triangle mesh (maps only).
     Stl,
+    /// A closed polyline (contours only).
+    Dxf,
 }
 
 /// `points` (as from [`surface`], shifted to work coordinates) in `format`. `probed` says which
@@ -623,6 +625,8 @@ pub fn export(
         ExportFormat::Csv => delimited(points, ','),
         ExportFormat::Tsv => delimited(points, '\t'),
         ExportFormat::Stl => stl(spec, probed, points),
+        // Refused before it gets here: a map isn't a polyline.
+        ExportFormat::Dxf => Vec::new(),
     }
 }
 
