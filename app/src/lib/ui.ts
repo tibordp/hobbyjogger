@@ -25,14 +25,38 @@ export interface ProbeForm {
   across: Across;
 }
 
+export type MapView = "2d" | "3d";
+
 interface Ui {
   /** Jog speed as a fraction of the axis max rate; also used for moves picked on the bed. */
   jogSpeed: number;
   probe: ProbeForm;
+  /** The bed map, top-down or in 3D; remembered between runs. */
+  mapView: MapView;
+}
+
+const MAP_VIEW_KEY = "hj.mapView";
+
+function storedMapView(): MapView {
+  try {
+    return localStorage.getItem(MAP_VIEW_KEY) === "3d" ? "3d" : "2d";
+  } catch {
+    return "2d";
+  }
+}
+
+export function setMapView(mapView: MapView) {
+  useUi.setState({ mapView });
+  try {
+    localStorage.setItem(MAP_VIEW_KEY, mapView);
+  } catch {
+    // Not remembered, then.
+  }
 }
 
 export const useUi = create<Ui>(() => ({
   jogSpeed: 0.25,
+  mapView: storedMapView(),
   probe: {
     kind: "corner",
     side: "left",

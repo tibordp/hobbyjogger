@@ -1,5 +1,5 @@
 import { Crosshair, Move, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Analysis } from "@/bindings/Analysis";
 import type { Corner } from "@/bindings/Corner";
@@ -14,16 +14,21 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Z_BAR_WIDTH, ZBar } from "@/components/ZBar";
 import { act } from "@/lib/actions";
 import { canJog, isProbe, useConnected, useJobRunning, useMachineState, useStatus } from "@/lib/machine";
 import { fitProblems, useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
-import { useUi, type ProbeForm } from "@/lib/ui";
+import { setMapView, useUi, type ProbeForm } from "@/lib/ui";
 import { cn } from "@/lib/utils";
+
+const Bed3D = lazy(() => import("@/components/Bed3D"));
 
 /** Used until the machine reports its limits (Z1 values). */
 const DEFAULT_MIN = [-207, -206];
 const MARGIN = 8;
+/** Around the drawing and Z bar, px. */
+const PADDING = 16;
 
 type Point = { x: number; y: number };
 
@@ -135,8 +140,9 @@ function ProbePreview({ form, at, ball, sx, sy }: { form: ProbeForm; at: [number
 
 /**
  * Top-down view of the work area in machine coordinates: tool position, work zero and the program
- * preview. Clicking a point offers to move the head there (X/Y only, at the current height) or to
- * put the work origin there without moving. Placeholder for the 3D view.
+ * preview, with Z in a bar beside it. Clicking a point offers to move the head there (X/Y only, at
+ * the current height) or to put the work origin there without moving; the bar does the same for
+ * Z. Or, switched to 3D, a view-only look at the program in space.
  */
 export function BedView() {
   const connected = useConnected();
@@ -148,6 +154,8 @@ export function BedView() {
   const speed = useUi((s) => s.jogSpeed);
   const svg = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<Point | null>(null);
+  const [hoverZ, setHoverZ] = useState<number | null>(null);
+  const view = useUi((s) => s.mapView);
   const [target, setTarget] = useState<Point | null>(null);
   const analysis = useProgram((s) => s.analysis);
   const cursorLine = useProgram((s) => s.cursorLine);
@@ -171,6 +179,16 @@ export function BedView() {
   /** The clicked point, and where to anchor the menu (relative to the drawing's container). */
   const [menu, setMenu] = useState<{ p: Point; left: number; top: number } | null>(null);
   const area = useRef<HTMLDivElement>(null);
+  // The drawing is sized to fit, so the Z bar can stand right beside it at the same height.
+  const outer = useRef<HTMLDivElement>(null);
+  const [room, setRoom] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = outer.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setRoom({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [view]);
 
   const openMenu = (e: React.MouseEvent) => {
     const p = toMachine(e);
@@ -250,6 +268,11 @@ export function BedView() {
     const p = pathData(analysis, from, to, preview.map);
     return p.rapid + p.feed;
   }, [preview, analysis, cursorLine]);
+  const fitScale = Math.max(
+    Math.min((room.w - 2 * PADDING - Z_BAR_WIDTH - 8) / (w + 2 * MARGIN), (room.h - 2 * PADDING) / (h + 2 * MARGIN)),
+    0,
+  );
+  const drawn = { w: (w + 2 * MARGIN) * fitScale, h: (h + 2 * MARGIN) * fitScale, scale: fitScale };
   const problems =
     analysis && offset && travel ? fitProblems(analysis, offset, travel) : [];
 
@@ -257,7 +280,13 @@ export function BedView() {
     <div className="flex h-full flex-col">
       <div className="flex h-11 shrink-0 items-center gap-3 border-b px-3">
         <div className="font-mono text-xs">
-          {hover && (
+          {view === "2d" && hoverZ !== null && (
+            <>
+              {t && connected && <span>W Z{(hoverZ - (t.machine[2] - t.work[2])).toFixed(2)}</span>}
+              <span className="ml-3 text-muted-foreground">M Z{hoverZ.toFixed(2)}</span>
+            </>
+          )}
+          {view === "2d" && hover && (
             <>
               {offset && (
                 <span>
@@ -280,112 +309,138 @@ export function BedView() {
             <span className="truncate">Outside travel: {problems.map((p) => p.short).join(", ")}</span>
           </span>
         )}
+        <div className="flex shrink-0 rounded-md border p-0.5 text-xs" role="radiogroup" aria-label="Map view">
+          {(["2d", "3d"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="radio"
+              aria-checked={view === v}
+              className={cn(
+                "rounded-sm px-2 py-0.5 font-medium uppercase",
+                view === v ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground",
+              )}
+              onClick={() => setMapView(v)}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div ref={area} className="relative flex min-h-0 flex-1 items-center justify-center p-4">
-        <DropdownMenu open={menu !== null} onOpenChange={(open) => !open && setMenu(null)}>
-          <DropdownMenuTrigger asChild>
-            <span className="pointer-events-none absolute size-0" style={{ left: menu?.left ?? 0, top: menu?.top ?? 0 }} />
-          </DropdownMenuTrigger>
-          {menu && (
-            <DropdownMenuContent align="start" sideOffset={6} className="min-w-56">
-              <DropdownMenuLabel className="font-mono text-xs font-normal">
-                {offset && (
-                  <div>
-                    W X{(menu.p.x - offset[0]).toFixed(2)} Y{(menu.p.y - offset[1]).toFixed(2)}
-                  </div>
-                )}
-                <div className="text-muted-foreground">
-                  M X{menu.p.x.toFixed(2)} Y{menu.p.y.toFixed(2)}
-                </div>
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={!canAct} onSelect={() => moveHere(menu.p)}>
-                <Move /> Move head here
-                <DropdownMenuShortcut>{Math.round(speed * 100)}%</DropdownMenuShortcut>
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={!canAct}
-                onSelect={() => void act({ type: "setOrigin", x: menu.p.x, y: menu.p.y })}
-              >
-                <Crosshair /> Set work origin here
-                <DropdownMenuShortcut>X/Y</DropdownMenuShortcut>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          )}
-        </DropdownMenu>
-        <svg
-          ref={svg}
-          viewBox={`${-MARGIN} ${-MARGIN} ${w + 2 * MARGIN} ${h + 2 * MARGIN}`}
-          className={cn("h-full max-h-full w-full max-w-full", connected && "cursor-crosshair")}
-          onMouseMove={(e) => setHover(toMachine(e))}
-          onMouseLeave={() => setHover(null)}
-          onClick={openMenu}
-          onContextMenu={openMenu}
-        >
-          <rect x={0} y={0} width={w} height={h} className="fill-muted/30 stroke-border" strokeWidth={0.6} />
-          {grid}
-          {preview && (
-            <g className="pointer-events-none" fill="none" strokeLinejoin="round" strokeLinecap="round">
-              {preview.box && (
-                <rect
-                  {...{ x: preview.box.x, y: preview.box.y, width: preview.box.w, height: preview.box.h }}
-                  className="stroke-fuchsia-400/30"
-                  strokeWidth={0.3}
-                  strokeDasharray="1.5 1"
+      {view === "3d" ? (
+        <Suspense fallback={<div className="flex-1" />}>
+          <Bed3D />
+        </Suspense>
+      ) : (
+        <div ref={outer} className="flex min-h-0 flex-1 items-center justify-center gap-2 overflow-hidden">
+          <div ref={area} className="relative shrink-0" style={{ width: drawn.w, height: drawn.h }}>
+            <DropdownMenu open={menu !== null} onOpenChange={(open) => !open && setMenu(null)}>
+              <DropdownMenuTrigger asChild>
+                <span className="pointer-events-none absolute size-0" style={{ left: menu?.left ?? 0, top: menu?.top ?? 0 }} />
+              </DropdownMenuTrigger>
+              {menu && (
+                <DropdownMenuContent align="start" sideOffset={6} className="min-w-56">
+                  <DropdownMenuLabel className="font-mono text-xs font-normal">
+                    {offset && (
+                      <div>
+                        W X{(menu.p.x - offset[0]).toFixed(2)} Y{(menu.p.y - offset[1]).toFixed(2)}
+                      </div>
+                    )}
+                    <div className="text-muted-foreground">
+                      M X{menu.p.x.toFixed(2)} Y{menu.p.y.toFixed(2)}
+                    </div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem disabled={!canAct} onSelect={() => moveHere(menu.p)}>
+                    <Move /> Move head here
+                    <DropdownMenuShortcut>{Math.round(speed * 100)}%</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={!canAct}
+                    onSelect={() => void act({ type: "setOrigin", x: menu.p.x, y: menu.p.y })}
+                  >
+                    <Crosshair /> Set work origin here
+                    <DropdownMenuShortcut>X/Y</DropdownMenuShortcut>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              )}
+            </DropdownMenu>
+            <svg
+              ref={svg}
+              viewBox={`${-MARGIN} ${-MARGIN} ${w + 2 * MARGIN} ${h + 2 * MARGIN}`}
+              className={cn("block size-full", connected && "cursor-crosshair")}
+              onMouseMove={(e) => setHover(toMachine(e))}
+              onMouseLeave={() => setHover(null)}
+              onClick={openMenu}
+              onContextMenu={openMenu}
+            >
+              <rect x={0} y={0} width={w} height={h} className="fill-muted/30 stroke-border" strokeWidth={0.6} />
+              {grid}
+              {preview && (
+                <g className="pointer-events-none" fill="none" strokeLinejoin="round" strokeLinecap="round">
+                  {preview.box && (
+                    <rect
+                      {...{ x: preview.box.x, y: preview.box.y, width: preview.box.w, height: preview.box.h }}
+                      className="stroke-fuchsia-400/30"
+                      strokeWidth={0.3}
+                      strokeDasharray="1.5 1"
+                    />
+                  )}
+                  <path d={preview.done.rapid} className="stroke-muted-foreground/20" strokeWidth={0.2} strokeDasharray="1 1" />
+                  <path d={preview.done.feed} className="stroke-fuchsia-400/25" strokeWidth={0.4} />
+                  <path d={preview.rest.rapid} className="stroke-muted-foreground/50" strokeWidth={0.2} strokeDasharray="1 1" />
+                  <path d={preview.rest.feed} className="stroke-fuchsia-400" strokeWidth={0.4} />
+                  {highlight && <path d={highlight} className="stroke-yellow-300" strokeWidth={1} />}
+                </g>
+              )}
+              {probe && <ProbeOverlay probe={probe} sx={sx} sy={sy} h={h} w={w} />}
+              {tool && t && probe && !probe.running && isProbe(status?.tool?.number) && state === "idle" && (
+                <ProbePreview form={probeForm} at={[t.machine[0], t.machine[1]]} ball={probe.settings.ballDiameter} sx={sx} sy={sy} />
+              )}
+              {zero && (
+                <g className="stroke-emerald-500" strokeWidth={0.6}>
+                  <line x1={zero.x - 6} y1={zero.y} x2={zero.x + 6} y2={zero.y} />
+                  <line x1={zero.x} y1={zero.y - 6} x2={zero.x} y2={zero.y + 6} />
+                  <circle cx={zero.x} cy={zero.y} r={2.5} fill="none" />
+                </g>
+              )}
+              {hover && connected && !menu && (
+                <g className="pointer-events-none stroke-sky-400/50" strokeWidth={0.3}>
+                  <line x1={sx(hover.x)} y1={0} x2={sx(hover.x)} y2={h} />
+                  <line x1={0} y1={sy(hover.y)} x2={w} y2={sy(hover.y)} />
+                </g>
+              )}
+              {menu && (
+                <circle
+                  cx={sx(menu.p.x)}
+                  cy={sy(menu.p.y)}
+                  r={2}
+                  fill="none"
+                  className="pointer-events-none stroke-sky-400"
+                  strokeWidth={0.6}
                 />
               )}
-              <path d={preview.done.rapid} className="stroke-muted-foreground/20" strokeWidth={0.2} strokeDasharray="1 1" />
-              <path d={preview.done.feed} className="stroke-fuchsia-400/25" strokeWidth={0.4} />
-              <path d={preview.rest.rapid} className="stroke-muted-foreground/50" strokeWidth={0.2} strokeDasharray="1 1" />
-              <path d={preview.rest.feed} className="stroke-fuchsia-400" strokeWidth={0.4} />
-              {highlight && <path d={highlight} className="stroke-yellow-300" strokeWidth={1} />}
-            </g>
-          )}
-          {probe && <ProbeOverlay probe={probe} sx={sx} sy={sy} h={h} w={w} />}
-          {tool && t && probe && !probe.running && isProbe(status?.tool?.number) && state === "idle" && (
-            <ProbePreview form={probeForm} at={[t.machine[0], t.machine[1]]} ball={probe.settings.ballDiameter} sx={sx} sy={sy} />
-          )}
-          {zero && (
-            <g className="stroke-emerald-500" strokeWidth={0.6}>
-              <line x1={zero.x - 6} y1={zero.y} x2={zero.x + 6} y2={zero.y} />
-              <line x1={zero.x} y1={zero.y - 6} x2={zero.x} y2={zero.y + 6} />
-              <circle cx={zero.x} cy={zero.y} r={2.5} fill="none" />
-            </g>
-          )}
-          {hover && connected && !menu && (
-            <g className="pointer-events-none stroke-sky-400/50" strokeWidth={0.3}>
-              <line x1={sx(hover.x)} y1={0} x2={sx(hover.x)} y2={h} />
-              <line x1={0} y1={sy(hover.y)} x2={w} y2={sy(hover.y)} />
-            </g>
-          )}
-          {menu && (
-            <circle
-              cx={sx(menu.p.x)}
-              cy={sy(menu.p.y)}
-              r={2}
-              fill="none"
-              className="pointer-events-none stroke-sky-400"
-              strokeWidth={0.6}
-            />
-          )}
-          {target && (
-            <g className="stroke-amber-400" strokeWidth={0.6}>
-              {tool && <line x1={tool.x} y1={tool.y} x2={sx(target.x)} y2={sy(target.y)} strokeDasharray="2 1.5" />}
-              <circle cx={sx(target.x)} cy={sy(target.y)} r={2} fill="none" />
-            </g>
-          )}
-          {tool && (
-            <g>
-              <circle cx={tool.x} cy={tool.y} r={3.2} className="fill-sky-500/30 stroke-sky-400" strokeWidth={0.6} />
-              <circle cx={tool.x} cy={tool.y} r={0.8} className="fill-sky-400" />
-            </g>
-          )}
-          <text x={w / 2} y={h + 6} textAnchor="middle" className="fill-muted-foreground text-[4px]">
-            front
-          </text>
-        </svg>
-      </div>
+              {target && (
+                <g className="stroke-amber-400" strokeWidth={0.6}>
+                  {tool && <line x1={tool.x} y1={tool.y} x2={sx(target.x)} y2={sy(target.y)} strokeDasharray="2 1.5" />}
+                  <circle cx={sx(target.x)} cy={sy(target.y)} r={2} fill="none" />
+                </g>
+              )}
+              {tool && (
+                <g>
+                  <circle cx={tool.x} cy={tool.y} r={3.2} className="fill-sky-500/30 stroke-sky-400" strokeWidth={0.6} />
+                  <circle cx={tool.x} cy={tool.y} r={0.8} className="fill-sky-400" />
+                </g>
+              )}
+              <text x={w / 2} y={h + 6} textAnchor="middle" className="fill-muted-foreground text-[4px]">
+                front
+              </text>
+            </svg>
+          </div>
+          <ZBar height={drawn.h} pad={MARGIN * drawn.scale} onHover={setHoverZ} />
+        </div>
+      )}
     </div>
   );
 }

@@ -994,7 +994,7 @@ impl Actor {
                 self.send_line(&format!("G10 L20 P0 {}", words.join(" ")))
                     .await
             }
-            Request::MoveTo { x, y, speed } => {
+            Request::MoveTo { x, y, z, speed } => {
                 let pos = self.jog_start("move")?;
                 let delta = |target: Option<f64>, i: usize| -> Result<Option<f64>, CoreError> {
                     match target {
@@ -1005,7 +1005,7 @@ impl Actor {
                         None => Ok(None),
                     }
                 };
-                self.jog([delta(x, 0)?, delta(y, 1)?, None, None], speed)
+                self.jog([delta(x, 0)?, delta(y, 1)?, delta(z, 2)?, None], speed)
                     .await
             }
             Request::Jog { x, y, z, a, speed } => self.jog([x, y, z, a], speed).await,
@@ -1112,6 +1112,7 @@ impl Actor {
                 if self.routine.is_none() {
                     self.state.probe.error = None;
                     self.state.probe.result = None;
+                    self.state.probe.contacts.clear();
                     self.state.probe.can_back_off = false;
                     self.back_off = None;
                 }

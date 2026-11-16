@@ -545,12 +545,15 @@ pub enum Request {
     SetProbeSettings {
         settings: ProbeSettings,
     },
-    /// Move X/Y to a machine position at the current height, as a jog. `speed` as in [`Request::Jog`].
+    /// Move to a machine position, as a jog; axes left out stay where they are. `speed` as in
+    /// [`Request::Jog`].
     MoveTo {
         #[ts(optional)]
         x: Option<f64>,
         #[ts(optional)]
         y: Option<f64>,
+        #[ts(optional)]
+        z: Option<f64>,
         speed: f64,
     },
     /// List a directory on the SD card (the current one if `dir` is omitted).

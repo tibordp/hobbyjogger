@@ -188,6 +188,7 @@ async fn drives_simulator() {
     core.request(Request::MoveTo {
         x: Some(-300.0),
         y: Some(-50.0),
+        z: None,
         speed: 1.0,
     })
     .await
@@ -196,6 +197,22 @@ async fn drives_simulator() {
         state_of(m) == Some("idle")
             && m.telemetry.as_ref().is_some_and(|t| {
                 (t.machine[0] + 206.99).abs() < 1e-6 && (t.machine[1] + 50.0).abs() < 1e-6
+            })
+    })
+    .await;
+    // And Z alone (the Z bar), leaving X/Y.
+    core.request(Request::MoveTo {
+        x: None,
+        y: None,
+        z: Some(-20.0),
+        speed: 1.0,
+    })
+    .await
+    .unwrap();
+    until(&sink, "move-to Z", |m| {
+        state_of(m) == Some("idle")
+            && m.telemetry.as_ref().is_some_and(|t| {
+                (t.machine[2] + 20.0).abs() < 1e-6 && (t.machine[0] + 206.99).abs() < 1e-6
             })
     })
     .await;
@@ -566,6 +583,13 @@ async fn probes_the_simulated_part() {
     until(&sink, "origin at the corner", |m| {
         let o = &m.state.as_ref().unwrap()["status"]["workOffset"];
         close(&o[0], PART_MIN[0]) && close(&o[1], PART_MIN[1]) && close(&o[2], PART_TOP)
+    })
+    .await;
+    // Done with it: the result and its contacts go off the map.
+    core.request(Request::DismissProbe).await.unwrap();
+    until(&sink, "probe dismissed", |m| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["result"].is_null() && p["contacts"].as_array().is_some_and(|c| c.is_empty())
     })
     .await;
 

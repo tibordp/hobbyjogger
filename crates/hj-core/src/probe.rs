@@ -557,7 +557,8 @@ async fn execute(routine: &Routine, io: &mut Io) -> Result<ProbeResult> {
                             )
                         })?;
                     contacts[k] = io.touch(axis, -dir, out + 2.0).await?;
-                    io.travel_to(outside).await?;
+                    // Straight up beside the wall; the next move crosses over from there.
+                    io.travel([0.0, 0.0, center[2] - io.here[2]]).await?;
                 }
                 center[axis] = (contacts[0] + contacts[1]) / 2.0;
                 widths[axis] = contacts[0] - contacts[1] - 2.0 * r;
