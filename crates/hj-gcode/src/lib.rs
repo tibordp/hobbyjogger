@@ -8,6 +8,7 @@
 
 mod lex;
 pub mod reference;
+pub mod transform;
 
 use serde::Serialize;
 use ts_rs::TS;

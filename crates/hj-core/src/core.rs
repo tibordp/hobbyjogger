@@ -1104,7 +1104,8 @@ impl Actor {
                 }
                 Ok(())
             }
-            Request::TraceContour { spec } => self.start_contour(spec),
+            Request::TraceContour { spec } => self.start_contour(Some(spec)),
+            Request::ResumeContour => self.start_contour(None),
             Request::DiscardContour => {
                 if self.routine.is_some()
                     && self.state.probe.contour.as_ref().is_some_and(|c| !c.closed)
@@ -1145,7 +1146,11 @@ impl Actor {
                 if self.routine.is_some() {
                     return Err(CoreError::Rejected("a routine is running".into()));
                 }
-                let halted = self.machine_state()? == MachineState::Alarm;
+                // Unlocked whatever the last report said: right after a halt it can still read as
+                // running, and everything after `$X` is refused until it's sent. Harmless if not
+                // halted.
+                self.machine_state()?;
+                let halted = true;
                 match self.back_off.take() {
                     Some(dir) => {
                         let io = self.routine_io();
@@ -1505,6 +1510,7 @@ impl Actor {
         let sizes: &[f64] = match &routine {
             probe::Routine::Surface => &[],
             probe::Routine::Edge { search, .. } => &[*search],
+            probe::Routine::EdgeAngle { search, span, .. } => &[*search, *span],
             probe::Routine::Corner { depth, reach, .. } => &[*depth, *reach],
             probe::Routine::Bore { diameter, .. } => &[*diameter],
             probe::Routine::Boss {
@@ -1619,7 +1625,8 @@ impl Actor {
     }
 
     /// A contour from where the 3D probe is, at its height.
-    fn start_contour(&mut self, spec: contour::ContourSpec) -> Result<(), CoreError> {
+    /// A new contour (`spec`), or carry on with one that stopped partway.
+    fn start_contour(&mut self, spec: Option<contour::ContourSpec>) -> Result<(), CoreError> {
         self.require(&[MachineState::Idle], "trace")?;
         if self.current_tool() != Some(PROBE_TOOL) {
             return Err(CoreError::Rejected(
@@ -1627,17 +1634,40 @@ impl Actor {
             ));
         }
         self.check_probing_firmware()?;
-        spec.check().map_err(CoreError::Rejected)?;
         let z = self
             .last_status
             .as_ref()
             .map(|s| s.machine_pos.0[2])
             .ok_or_else(|| CoreError::Rejected("position unknown".into()))?;
+        let (spec, so_far) = match spec {
+            Some(spec) => {
+                spec.check().map_err(CoreError::Rejected)?;
+                (spec, vec![])
+            }
+            None => match &self.state.probe.contour {
+                Some(c) if !c.closed => {
+                    if (c.z - z).abs() > 0.01 {
+                        return Err(CoreError::Rejected(format!(
+                            "it was tracing at machine Z{:.3}; jog back to that height (it's at Z{z:.3})",
+                            c.z
+                        )));
+                    }
+                    (c.spec.clone(), c.points.clone())
+                }
+                Some(_) => return Err(CoreError::Rejected("the contour is closed".into())),
+                None => return Err(CoreError::Rejected("no contour to carry on with".into())),
+            },
+        };
         let io = self.routine_io();
         self.note(
             ConsoleKind::Info,
             format!(
-                "tracing {} contour at Z{z:.3}",
+                "{} {} contour at Z{z:.3}",
+                if so_far.is_empty() {
+                    "tracing"
+                } else {
+                    "carrying on with"
+                },
                 if spec.inside {
                     "an inside"
                 } else {
@@ -1661,11 +1691,11 @@ impl Actor {
         self.state.probe.contour = Some(Contour {
             spec: spec.clone(),
             z,
-            points: vec![],
+            points: so_far.clone(),
             closed: false,
         });
         self.back_off = None;
-        self.spawn_routine(contour::run(spec, io));
+        self.spawn_routine(contour::run(spec, so_far, io));
         Ok(())
     }
 
@@ -1772,6 +1802,7 @@ impl Actor {
             lines,
             here: [here[0], here[1], here[2]],
             settings: self.state.probe.settings.clone(),
+            released_at: None,
         }
     }
 
@@ -1945,7 +1976,7 @@ impl Actor {
                                 fmt("Y", r.y),
                                 fmt("Z", r.z),
                                 fmt("Ø", r.diameter)
-                            ),
+                            ) + &r.angle.map(|a| format!(" ∠{a:.3}°")).unwrap_or_default(),
                         );
                         self.state.probe.result = Some(r);
                     }

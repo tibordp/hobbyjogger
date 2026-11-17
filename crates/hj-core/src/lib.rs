@@ -3,6 +3,8 @@
 
 pub mod contour;
 mod core;
+pub mod dxf;
+pub mod fit;
 pub mod map;
 pub mod probe;
 pub mod program;

@@ -1,4 +1,4 @@
-import { ArrowDownToLine, CircleDot, Crosshair, LoaderCircle, Navigation, Settings2, Square, TriangleAlert, Undo2, X } from "lucide-react";
+import { ArrowDownToLine, CircleDot, Crosshair, LoaderCircle, Navigation, RotateCcwSquare, Settings2, Square, TriangleAlert, Undo2, X } from "lucide-react";
 import { useState } from "react";
 
 import type { Across } from "@/bindings/Across";
@@ -15,6 +15,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { act } from "@/lib/actions";
 import { DEPTH_PROBE_TOOL, PROBE_TOOL, useConnected, useJobRunning, useMachineState, useStatus } from "@/lib/machine";
 import { useStore } from "@/lib/store";
+import { startRotate } from "@/lib/transform";
 import { routineOf, setProbeForm, useUi, type ProbeForm, type ProbeKind } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -170,7 +171,9 @@ function instructions(f: ProbeForm) {
     case "surface":
       return "Jog the probe above the surface. It touches down and finds the top.";
     case "edge":
-      return `Jog the probe beside the part, outside the ${SIDE_TEXT[f.side]} edge, at the height to touch it. It moves in until it touches (click an edge to pick another).`;
+      return f.edgeAngle
+        ? `Jog the probe beside the part, outside the ${SIDE_TEXT[f.side]} edge, at the height to touch it and level with the middle of it. It touches twice, ${f.edgeSpan} mm apart along the edge, for its angle too.`
+        : `Jog the probe beside the part, outside the ${SIDE_TEXT[f.side]} edge, at the height to touch it. It moves in until it touches (click an edge to pick another).`;
     case "corner":
       return `Jog the probe above the part, within ${f.reach} mm of both edges at the ${CORNER_TEXT[f.corner]} corner (click a corner to pick another).`;
     case "bore":
@@ -262,6 +265,15 @@ function Result({ result, offset, canApply }: { result: ProbeResult; offset: num
             <span />
           </>
         )}
+        {result.angle !== null && (
+          <>
+            <span className="text-muted-foreground" title="How far the part is turned from square, counter-clockwise seen from above">
+              ∠
+            </span>
+            <span className="text-right">{result.angle.toFixed(3)}°</span>
+            <span className="text-right text-xs leading-5 text-muted-foreground">{result.angle >= 0 ? "⟲ CCW" : "⟳ CW"}</span>
+          </>
+        )}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={!canApply} onClick={() => origin(true)} title="Makes this the work origin. Nothing moves.">
@@ -270,6 +282,16 @@ function Result({ result, offset, canApply }: { result: ProbeResult; offset: num
         {xy && result.z !== null && (
           <Button size="sm" variant="outline" disabled={!canApply} onClick={() => origin(false)}>
             {letters(false)} only
+          </Button>
+        )}
+        {result.angle !== null && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => startRotate(Math.round(result.angle! * 1000) / 1000)}
+            title="Turns the program in the editor by this, about its X0 Y0, so it lines up with the part"
+          >
+            <RotateCcwSquare /> Rotate program by this
           </Button>
         )}
         {centre && (
@@ -394,7 +416,27 @@ export function ProbePanel() {
               <p className="text-xs leading-relaxed text-muted-foreground">{instructions(form)}</p>
               <div className="flex flex-wrap gap-x-3 gap-y-1.5">
                 {form.kind === "edge" && (
-                  <Field label="Search" value={form.edgeSearch} onChange={(edgeSearch) => setProbeForm({ edgeSearch })} title="How far it moves in looking for the edge" />
+                  <>
+                    <ToggleGroup
+                      type="single"
+                      variant="outline"
+                      size="sm"
+                      spacing={0}
+                      value={form.edgeAngle ? "angle" : "position"}
+                      onValueChange={(v) => v && setProbeForm({ edgeAngle: v === "angle" })}
+                    >
+                      <ToggleGroupItem value="position" className="h-7 px-2 text-xs" title="One touch: where the edge is">
+                        Position
+                      </ToggleGroupItem>
+                      <ToggleGroupItem value="angle" className="h-7 px-2 text-xs" title="Two touches along it: where it is and how it's turned">
+                        Angle
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                    <Field label="Search" value={form.edgeSearch} onChange={(edgeSearch) => setProbeForm({ edgeSearch })} title="How far it moves in looking for the edge" />
+                    {form.edgeAngle && (
+                      <Field label="Span" value={form.edgeSpan} onChange={(edgeSpan) => setProbeForm({ edgeSpan })} title="How far apart along the edge it touches: further is more precise" />
+                    )}
+                  </>
                 )}
                 {form.kind === "corner" && (
                   <Field label="Reach" value={form.reach} onChange={(reach) => setProbeForm({ reach })} title="How far the edges may be from where the probe starts" />

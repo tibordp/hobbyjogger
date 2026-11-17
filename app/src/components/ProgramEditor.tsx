@@ -13,11 +13,12 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view";
-import { FilePlus2, FolderOpen, Locate, Lock, Play, Save, Upload } from "lucide-react";
+import { FilePlus2, FolderOpen, Locate, Lock, Play, Save, Upload, VectorSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { MachineFilesDialog } from "@/components/MachineFilesDialog";
 import { RunDialog } from "@/components/RunDialog";
+import { TransformSidebar } from "@/components/TransformSidebar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { act } from "@/lib/actions";
@@ -29,6 +30,7 @@ import {
   formatDuration,
   newProgram,
   openWithDialog,
+  registerTextReplacer,
   registerTextSource,
   saveFile,
   takeInitialText,
@@ -36,6 +38,9 @@ import {
   useProgram,
 } from "@/lib/program";
 import { useStore } from "@/lib/store";
+import { closeTransforms, openTransforms } from "@/lib/transform";
+import { useUi } from "@/lib/ui";
+import { cn } from "@/lib/utils";
 
 /** Highlights the line a running job has reached. */
 const setJobLine = StateEffect.define<number | null>();
@@ -117,6 +122,7 @@ export function ProgramEditor() {
   const connected = useConnected();
   const state = useMachineState();
   const [running, setRunning] = useState(false);
+  const transforming = useUi((s) => s.transforms !== null);
   /** Keeping the job line in view; off once the user scrolls away. */
   const [live, setLive] = useState(true);
 
@@ -124,8 +130,10 @@ export function ProgramEditor() {
     const v = new EditorView({ parent: host.current! });
     view.current = v;
     registerTextSource(() => v.state.doc.toString());
+    registerTextReplacer((text) => v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text } }));
     return () => {
       registerTextSource(takeInitialText);
+      registerTextReplacer(null);
       v.destroy();
       view.current = null;
     };
@@ -214,6 +222,18 @@ export function ProgramEditor() {
         ) : (
           dirty && <span className="text-xs text-muted-foreground">edited</span>
         )}
+        <div className="mx-1 h-5 w-px shrink-0 bg-border" />
+        <Button
+          size="sm"
+          variant="ghost"
+          className={cn(transforming && "bg-muted")}
+          aria-pressed={transforming}
+          disabled={following || (!transforming && !analysis)}
+          onClick={() => (transforming ? closeTransforms() : openTransforms())}
+          title="Transform the program: rotate it to line it up with a part that sits turned, or move it"
+        >
+          <VectorSquare /> Transform
+        </Button>
         <div className="flex-1" />
         {analysis && (
           <span className="mr-2 truncate text-xs text-muted-foreground">
@@ -233,13 +253,16 @@ export function ProgramEditor() {
           <Play /> Run
         </Button>
       </div>
-      <div className="relative min-h-0 flex-1">
-        <div ref={host} className="absolute inset-0 overflow-hidden" />
-        {following && !live && (
-          <Button size="sm" className="absolute right-5 bottom-4 z-10 shadow-lg" onClick={() => setLive(true)}>
-            <Locate /> Follow job{jobLineNo !== null && ` · line ${jobLineNo}`}
-          </Button>
-        )}
+      <div className="flex min-h-0 flex-1">
+        <div className="relative min-h-0 min-w-0 flex-1">
+          <div ref={host} className="absolute inset-0 overflow-hidden" />
+          {following && !live && (
+            <Button size="sm" className="absolute right-5 bottom-4 z-10 shadow-lg" onClick={() => setLive(true)}>
+              <Locate /> Follow job{jobLineNo !== null && ` · line ${jobLineNo}`}
+            </Button>
+          )}
+        </div>
+        <TransformSidebar />
       </div>
       <RunDialog open={running} onOpenChange={setRunning} />
     </div>

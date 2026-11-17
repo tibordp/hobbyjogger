@@ -85,6 +85,11 @@ pub const BORE_DEPTH: f64 = 10.0;
 pub const BOSS_CENTER: [f64; 2] = [-112.0, -130.0];
 pub const BOSS_DIAMETER: f64 = 12.0;
 pub const BOSS_HEIGHT: f64 = 5.0;
+/// A third part, for edge angles: a 20 mm square block turned 5° counter-clockwise, top at Z-60.
+pub const TILTED_CENTER: [f64; 2] = [-60.0, -175.0];
+pub const TILTED_SIZE: f64 = 20.0;
+pub const TILTED_ANGLE: f64 = 5.0;
+
 /// How far from where the probe let go its contact chatters, mm.
 const CHATTER: f64 = 0.1;
 
@@ -134,7 +139,13 @@ fn touches_part(tip: [f64; 3]) -> bool {
         dist(HOLE_CENTER) < HOLE_DIAMETER / 2.0 - r && c[2] > plate_top(c[0]) - HOLE_DEPTH + r;
     let in_dome = ((c[0] - d[0]).powi(2) + (c[1] - d[1]).powi(2) + (c[2] - d[2]).powi(2)).sqrt()
         <= DOME_RADIUS + r;
-    (in_block && !in_bore) || in_boss || (in_plate && !in_hole) || in_dome
+    // The tilted block, in its own (unturned) frame.
+    let (sin, cos) = TILTED_ANGLE.to_radians().sin_cos();
+    let (dx, dy) = (c[0] - TILTED_CENTER[0], c[1] - TILTED_CENTER[1]);
+    let (u, v) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+    let half = TILTED_SIZE / 2.0 + r;
+    let in_tilted = u.abs() <= half && v.abs() <= half && c[2] <= PART_TOP + r;
+    (in_block && !in_bore) || in_boss || (in_plate && !in_hole) || in_dome || in_tilted
 }
 
 /// A `G38.x` waiting for its move to finish before reporting.
@@ -205,6 +216,8 @@ struct Machine {
     /// Where the probe last let go: within [`CHATTER`] of it, it flickers, and a probe move
     /// toward anything stops at once (the firmware doesn't debounce it).
     released_at: Option<[f64; 3]>,
+    /// M119s answered, for leaving the probe out of some.
+    m119s: u32,
     /// Feed and spindle overrides, %.
     feed_override: f64,
     spindle_override: f64,
@@ -259,6 +272,7 @@ impl Default for Machine {
             atc_return: [0.0; 2],
             probe_report: None,
             released_at: None,
+            m119s: 0,
             feed_override: 100.0,
             spindle_override: 100.0,
             laser_mode: false,
@@ -783,12 +797,18 @@ impl Machine {
             Some(4902) => self.confirm_tool_change(out),
             Some(4910) => self.remeasure_tool(out),
             // The probe's state, as the firmware appends it to the endstops'.
+            // Every third time it's left out, as a Z1 was seen to do.
             Some(1190) => {
+                self.m119s += 1;
                 let p = self.planned();
-                out.push(format!(
-                    "Probe: {}\n",
-                    u8::from(touches_part([p[0], p[1], p[2]]))
-                ));
+                if self.m119s.is_multiple_of(3) {
+                    out.push("X_max:0 Y_max:0 Z_max:0 A_min:1 pins- (XL)P0.24:0\n".into());
+                } else {
+                    out.push(format!(
+                        "X_max:0 Y_max:0 Z_max:0 Probe: {}\n",
+                        u8::from(touches_part([p[0], p[1], p[2]]))
+                    ));
+                }
             }
             Some(2200) => self.feed_override = s_word.unwrap_or(100.0).clamp(10.0, 1000.0),
             Some(2230) => self.spindle_override = s_word.unwrap_or(100.0).clamp(50.0, 200.0),

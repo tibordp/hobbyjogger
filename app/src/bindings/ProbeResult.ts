@@ -15,4 +15,9 @@ z: number | null, diameter: number | null,
 /**
  * Across one axis: the bore's or boss's width along it.
  */
-width: number | null, };
+width: number | null, 
+/**
+ * An edge's angle, degrees counter-clockwise seen from above: how far the part is turned
+ * from square to the machine's axes. Rotating a program drawn square by this lines it up.
+ */
+angle: number | null, };

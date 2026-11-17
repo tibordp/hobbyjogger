@@ -5,6 +5,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Analysis } from "@/bindings/Analysis";
 import type { CodeRef } from "@/bindings/CodeRef";
 import type { ConsoleEntry } from "@/bindings/ConsoleEntry";
+import type { Drawing } from "@/bindings/Drawing";
+import type { Fit } from "@/bindings/Fit";
 import type { Program } from "@/bindings/Program";
 import type { Request } from "@/bindings/Request";
 import type { Snapshot } from "@/bindings/Snapshot";
@@ -18,6 +20,18 @@ export function request(request: Request): Promise<void> {
 
 export const getState = () => invoke<Snapshot>("get_state");
 export const analyzeGcode = (text: string) => invoke<Analysis>("analyze_gcode", { text });
+/** The program rotated about Z; rejects with the lines that keep it from being (`Problem[]`). */
+export const rotateGcode = (text: string, degrees: number, pivot: [number, number]) =>
+  invoke<string>("rotate_gcode", { text, degrees, pivot });
+/** The program moved by `offset`; rejects with the lines that keep it from being (`Problem[]`). */
+export const translateGcode = (text: string, offset: [number, number, number]) =>
+  invoke<string>("translate_gcode", { text, offset });
+/** The outlines in a DXF drawing, in mm. */
+export const importDxf = (path: string) => invoke<Drawing>("import_dxf", { path });
+/** The ways a drawing's outline fits traced ball centres (machine X/Y), best first; `offset` is
+ * the ball's radius, negative for a hole traced from inside. */
+export const fitOutline = (reference: [number, number][], measured: [number, number][], offset: number) =>
+  invoke<Fit[]>("fit_outline", { reference, measured, offset });
 export const gcodeReference = () => invoke<CodeRef[]>("gcode_reference");
 export const openProgram = (path: string) => invoke<Program>("open_program", { path });
 export const saveProgram = (path: string, text: string) =>

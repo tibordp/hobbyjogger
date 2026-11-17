@@ -136,6 +136,9 @@ pub enum Routine {
     /// Start beside the part, outside the edge, at the height to touch it; touches in, searching
     /// up to `search`.
     Edge { side: Side, search: f64 },
+    /// As for an edge, but it touches twice, `span` apart along the edge (half either side of
+    /// where it starts), for the edge's angle as well as its position.
+    EdgeAngle { side: Side, search: f64, span: f64 },
     /// Start above the part, within `reach` of both edges at the corner. Finds the top, then for
     /// each edge steps outside, drops `depth` below the top and touches back in.
     Corner {
@@ -164,6 +167,7 @@ impl Routine {
         match self {
             Self::Surface => "Surface".into(),
             Self::Edge { side, .. } => format!("{side:?} edge"),
+            Self::EdgeAngle { side, .. } => format!("{side:?} edge angle"),
             Self::Corner { corner, .. } => match corner {
                 Corner::FrontLeft => "Front left corner".into(),
                 Corner::FrontRight => "Front right corner".into(),
@@ -196,6 +200,9 @@ pub struct ProbeResult {
     pub diameter: Option<f64>,
     /// Across one axis: the bore's or boss's width along it.
     pub width: Option<f64>,
+    /// An edge's angle, degrees counter-clockwise seen from above: how far the part is turned
+    /// from square to the machine's axes. Rotating a program drawn square by this lines it up.
+    pub angle: Option<f64>,
 }
 
 /// Progress from a running routine to the core.
@@ -237,6 +244,8 @@ pub(crate) struct Io {
     /// Where the tool tip is, tracked from the `[PRB:…]` replies.
     pub here: [f64; 3],
     pub settings: ProbeSettings,
+    /// Where the probe last let go, where its contact chatters ([`Io::guarded`]).
+    pub released_at: Option<[f64; 3]>,
 }
 
 pub(crate) type Result<T> = std::result::Result<T, String>;
@@ -311,24 +320,32 @@ impl Io {
     }
 
     /// Whether the probe reads triggered now (`M119`, which ends its line with `Probe: 0|1`).
-    pub(crate) async fn triggered(&mut self) -> Result<bool> {
-        self.updates
-            .send(Update::Send("M119".into()))
-            .map_err(|_| "stopped".to_string())?;
-        let mut state = None;
-        loop {
-            let reply = tokio::time::timeout(Duration::from_secs(10), self.lines.recv())
-                .await
-                .map_err(|_| "no reply to M119".to_string())?
-                .ok_or("disconnected")?;
-            if let Some(v) = reply.split("Probe:").nth(1) {
-                state = Some(v.trim().starts_with('1'));
-            } else if reply == "ok" {
-                return state.ok_or_else(|| "M119 didn't say how the probe reads".into());
-            } else if reply.to_ascii_lowercase().starts_with("error") {
-                return Err(format!("the machine reported: {reply}"));
+    /// The Z1 sometimes leaves the probe out of its reply (seen on a machine: the endstops and pins,
+    /// then `ok`), so it asks a few times; `None` if it never says.
+    pub(crate) async fn triggered(&mut self) -> Result<Option<bool>> {
+        for _ in 0..3 {
+            self.updates
+                .send(Update::Send("M119".into()))
+                .map_err(|_| "stopped".to_string())?;
+            let mut state = None;
+            loop {
+                let reply = tokio::time::timeout(Duration::from_secs(10), self.lines.recv())
+                    .await
+                    .map_err(|_| "no reply to M119".to_string())?
+                    .ok_or("disconnected")?;
+                if let Some(v) = reply.split("Probe:").nth(1) {
+                    state = Some(v.trim().starts_with('1'));
+                } else if reply == "ok" {
+                    break;
+                } else if reply.to_ascii_lowercase().starts_with("error") || reply == "!!" {
+                    return Err(format!("the machine reported: {reply}"));
+                }
+            }
+            if state.is_some() {
+                return Ok(state);
             }
         }
+        Ok(None)
     }
 
     /// A plain relative move by `delta` (not a probe move: only for going back the way the probe
@@ -358,16 +375,25 @@ impl Io {
     }
 
     /// Back the probe off along `delta` until it lets go, then up to [`LET_GO`] mm (no more than
-    /// `extra`) further with a plain move. Returns false if it was still triggered after `delta`.
+    /// `extra`) further with a plain move; nothing if it's already free. Returns false if it was
+    /// still triggered after `delta`.
     ///
     /// Right where it lets go the contact chatters (the firmware doesn't debounce it), so a
     /// guarded move from there can stop at once on a flicker; the plain move clears that. And
     /// `G38.5` from a probe that has already let go is a halt, so it's only sent while the probe
     /// reads triggered.
     pub(crate) async fn let_go(&mut self, delta: [f64; 3], feed: f64, extra: f64) -> Result<bool> {
-        if self.triggered().await? && !self.probe_move("G38.5", delta, feed).await? {
+        // Not saying is taken as still pressed: this follows a touch (or a halt mid-move, where
+        // it's the user's call to recover).
+        if !self.triggered().await?.unwrap_or(true) {
+            // Already free: nothing to back off, and no plain move (which goes unguarded, and
+            // after a halt may not even point away from anything).
+            return Ok(true);
+        }
+        if !self.probe_move("G38.5", delta, feed).await? {
             return Ok(false);
         }
+        self.released_at = Some(self.here);
         let len = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
         let step = LET_GO.min(extra);
         if len > 1e-9 && step > 1e-4 {
@@ -378,10 +404,41 @@ impl Io {
 
     /// Move by `delta`, stopping if the probe touches anything on the way. Then it backs out to
     /// where the move started, which was clear, and reports the contact as an error.
+    /// A guarded move (`G38.3`) by `delta`: whether it touched. One that touches before it has
+    /// moved at all, where the probe last let go or while it reads free, is taken as the contact
+    /// chattering there (as seen after a halt partway through letting go): it goes up to
+    /// [`LET_GO`] along the way with a plain move, then carries on guarded. Anywhere else, an
+    /// instant touch is a touch: the move started against the wall.
+    pub(crate) async fn guarded(&mut self, delta: [f64; 3], feed: f64) -> Result<bool> {
+        let from = self.here;
+        if !self.probe_move("G38.3", delta, feed).await? {
+            return Ok(false);
+        }
+        let dist =
+            |a: [f64; 3], b: [f64; 3]| (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt();
+        let len = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
+        if dist(self.here, from) > CHATTER || len < 1e-9 {
+            return Ok(true);
+        }
+        let where_it_let_go = self
+            .released_at
+            .is_some_and(|r| dist(r, from) < 4.0 * CHATTER + LET_GO);
+        if !where_it_let_go && self.triggered().await? != Some(false) {
+            return Ok(true);
+        }
+        let step = LET_GO.min(len);
+        self.nudge(delta.map(|d| d / len * step)).await?;
+        let rest = [0, 1, 2].map(|i| from[i] + delta[i] - self.here[i]);
+        if rest.iter().map(|d| d * d).sum::<f64>().sqrt() < 1e-4 {
+            return Ok(false);
+        }
+        self.probe_move("G38.3", rest, feed).await
+    }
+
     pub(crate) async fn travel(&mut self, delta: [f64; 3]) -> Result<()> {
         let feed = self.settings.travel_feed;
         let from = self.here;
-        if !self.probe_move("G38.3", delta, feed).await? {
+        if !self.guarded(delta, feed).await? {
             return Ok(());
         }
         let hit = self.here;
@@ -514,6 +571,13 @@ impl Io {
     }
 }
 
+/// A move of `d` along one axis.
+fn across(axis: usize, d: f64) -> [f64; 3] {
+    let mut v = [0.0; 3];
+    v[axis] = d;
+    v
+}
+
 /// The way out if a probe move goes wrong (a unit vector), for [`back_off`]: back the way it
 /// came for a move toward something (`G38.2`/`G38.3`), onwards for one away from it
 /// (`G38.4`/`G38.5`). Never down, though: a probe that triggers going up is still pressed from
@@ -546,6 +610,9 @@ pub const BACK_OFF: f64 = 5.0;
 
 /// How far past where the probe lets go [`Io::let_go`] moves, clear of the chatter there, mm.
 pub const LET_GO: f64 = 0.5;
+
+/// A touch closer than this to where a move started is taken as chatter ([`Io::guarded`]), mm.
+const CHATTER: f64 = 0.02;
 
 /// Recover after a routine went wrong: clear the halt if `unlock`, then, if the probe still reads
 /// triggered, move along `dir` until it releases (and a little more). If it has already let go,
@@ -612,6 +679,46 @@ async fn execute(routine: &Routine, io: &mut Io) -> Result<ProbeResult> {
             } else {
                 result.y = Some(edge);
             }
+        }
+        Routine::EdgeAngle { side, search, span } => {
+            let (axis, out) = side.axis();
+            // The edge runs along the other axis.
+            let along = 1 - axis;
+            let start = io.here;
+            let mut touches = [[0.0; 2]; 2];
+            for (k, offset) in [-span / 2.0, span / 2.0].into_iter().enumerate() {
+                io.step(&format!(
+                    "Touching the {} edge, {} point",
+                    format!("{side:?}").to_lowercase(),
+                    if k == 0 { "first" } else { "second" }
+                ));
+                // Back out to where it started across the edge (a turned edge may come closer
+                // along it), then along to the point, then in.
+                io.travel(across(axis, start[axis] - io.here[axis])).await?;
+                io.travel(across(along, start[along] + offset - io.here[along]))
+                    .await?;
+                let contact = io.touch(axis, -out, search).await?;
+                touches[k] = [contact, io.here[along]];
+            }
+            io.travel(across(axis, start[axis] - io.here[axis])).await?;
+            // Position at the middle, compensated as for an edge; the radius doesn't change the
+            // angle.
+            let edge = (touches[0][0] + touches[1][0]) / 2.0 - out * r;
+            let (d_across, d_along) =
+                (touches[1][0] - touches[0][0], touches[1][1] - touches[0][1]);
+            // A part turned counter-clockwise by a: an edge along X rises in Y; one along Y moves
+            // toward −X as Y increases.
+            let angle = if axis == 1 {
+                d_across.atan2(d_along)
+            } else {
+                (-d_across).atan2(d_along)
+            };
+            if axis == 0 {
+                result.x = Some(edge);
+            } else {
+                result.y = Some(edge);
+            }
+            result.angle = Some(angle.to_degrees());
         }
         Routine::Corner {
             corner,

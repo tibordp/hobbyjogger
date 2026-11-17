@@ -1658,6 +1658,33 @@ async fn traces_outside_and_inside_contours() {
         assert!(dx.min(dy) < 0.35, "off the edge: {p:?}");
     }
 
+    // A drawing of the block (50 × 40, origin at its front-left corner) fits the trace: that
+    // corner where the block's is, square (or half way round: it's symmetrical).
+    let mut drawing = vec![];
+    for (a, b) in [
+        ([0.0, 0.0], [50.0, 0.0]),
+        ([50.0, 0.0], [50.0, 40.0]),
+        ([50.0, 40.0], [0.0, 40.0]),
+        ([0.0, 40.0], [0.0, 0.0]),
+    ] {
+        for k in 0..100 {
+            let u = k as f64 / 100.0;
+            drawing.push([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u]);
+        }
+    }
+    // The ball centres as traced, against the drawing grown by the ball's radius.
+    let fits = hj_core::fit::fit(&drawing, &points(&probe), BALL_RADIUS);
+    let square = fits
+        .iter()
+        .find(|f| f.angle.abs() < 1.0)
+        .expect("a square fit");
+    assert!(square.angle.abs() < 0.05, "{square:?}");
+    assert!(
+        (square.origin[0] - PART_MIN[0]).abs() < 0.05
+            && (square.origin[1] - PART_MIN[1]).abs() < 0.05,
+        "{square:?}"
+    );
+
     // Inside the bore, from its middle.
     until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
     core.request(goto(BORE_CENTER[0], BORE_CENTER[1], -65.0))
@@ -1701,4 +1728,201 @@ async fn traces_outside_and_inside_contours() {
     let text = std::fs::read_to_string(&dxf).unwrap();
     assert_eq!(text.matches("VERTEX").count(), inside.len());
     std::fs::remove_file(&dxf).unwrap();
+}
+
+#[tokio::test]
+async fn measures_edge_angles() {
+    use hj_core::probe::{Routine, Side};
+    use hj_sim::{TILTED_ANGLE, TILTED_CENTER, TILTED_SIZE};
+
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    core.request(Request::Mdi {
+        line: "M493.2 T9999".into(),
+    })
+    .await
+    .unwrap();
+    core.request(Request::SetProbeSettings {
+        settings: hj_core::probe::ProbeSettings {
+            fast_feed: 1200.0,
+            slow_feed: 300.0,
+            travel_feed: 2400.0,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    let finished = |m: &Mirror| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["running"].is_null() && (!p["result"].is_null() || !p["error"].is_null())
+    };
+    // The faces' distance from the centre, measured square to them, seen along an axis.
+    let face = (TILTED_SIZE / 2.0) / TILTED_ANGLE.to_radians().cos();
+
+    for (side, start, want) in [
+        (
+            Side::Front,
+            [TILTED_CENTER[0], TILTED_CENTER[1] - 16.0],
+            TILTED_CENTER[1] - face,
+        ),
+        (
+            Side::Left,
+            [TILTED_CENTER[0] - 16.0, TILTED_CENTER[1]],
+            TILTED_CENTER[0] - face,
+        ),
+    ] {
+        core.request(Request::Mdi {
+            line: format!(
+                "G53 G0 Z-40\nG53 G0 X{} Y{}\nG53 G0 Z-65",
+                start[0], start[1]
+            ),
+        })
+        .await
+        .unwrap();
+        until(&sink, "beside the tilted block", |m| {
+            state_of(m) == Some("idle")
+                && m.state.as_ref().unwrap()["batch"].is_null()
+                && m.telemetry.as_ref().is_some_and(|t| {
+                    (t.machine[0] - start[0]).abs() < 1e-6
+                        && (t.machine[1] - start[1]).abs() < 1e-6
+                        && (t.machine[2] + 65.0).abs() < 1e-6
+                })
+        })
+        .await;
+        core.request(Request::Probe {
+            routine: Routine::EdgeAngle {
+                side,
+                search: 10.0,
+                span: 12.0,
+            },
+        })
+        .await
+        .unwrap();
+        until(&sink, "edge angle", finished).await;
+        let p = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+        assert!(p["error"].is_null(), "{p}");
+        let angle = p["result"]["angle"].as_f64().unwrap();
+        assert!(
+            (angle - TILTED_ANGLE).abs() < 0.01,
+            "{side:?}: angle {angle}"
+        );
+        let at = if side == Side::Front {
+            &p["result"]["y"]
+        } else {
+            &p["result"]["x"]
+        };
+        assert!(
+            (at.as_f64().unwrap() - want).abs() < 0.01,
+            "{side:?}: edge at {at}, want {want}"
+        );
+        core.request(Request::DismissProbe).await.unwrap();
+        until(&sink, "idle after", |m| state_of(m) == Some("idle")).await;
+    }
+}
+
+#[tokio::test]
+async fn resumes_a_contour_after_a_halt() {
+    use hj_core::contour::{ContourSpec, wall};
+    use hj_sim::BALL_RADIUS;
+
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    core.request(Request::Mdi {
+        line: "M493.2 T9999".into(),
+    })
+    .await
+    .unwrap();
+    core.request(Request::SetProbeSettings {
+        settings: hj_core::probe::ProbeSettings {
+            fast_feed: 1200.0,
+            slow_feed: 300.0,
+            travel_feed: 2400.0,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    core.request(Request::Mdi {
+        line: "G53 G0 Z-40\nG53 G0 X-125 Y-158\nG53 G0 Z-65".into(),
+    })
+    .await
+    .unwrap();
+    until(&sink, "in front of the block", |m| {
+        state_of(m) == Some("idle")
+            && m.state.as_ref().unwrap()["batch"].is_null()
+            && m.telemetry.as_ref().is_some_and(|t| {
+                (t.machine[2] + 65.0).abs() < 1e-6 && (t.machine[1] + 158.0).abs() < 1e-6
+            })
+    })
+    .await;
+    let points = |m: &Mirror| {
+        m.state.as_ref().unwrap()["probe"]["contour"]["points"]
+            .as_array()
+            .map_or(0, |p| p.len())
+    };
+    core.request(Request::TraceContour {
+        spec: ContourSpec {
+            inside: false,
+            min: [-160.0, -160.0],
+            max: [-90.0, -100.0],
+            spacing: 8.0,
+            radius: 5.0,
+            search: 0.0,
+        },
+    })
+    .await
+    .unwrap();
+
+    // Halted partway round: it stops, keeping its touches.
+    until(&sink, "a few touches", |m| points(m) >= 6).await;
+    core.request(Request::Halt).await.unwrap();
+    until(&sink, "stopped", |m| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["running"].is_null() && !p["error"].is_null()
+    })
+    .await;
+    let kept = points(&sink.0.lock().unwrap());
+    // Recover, then carry on from there.
+    core.request(Request::RecoverProbe).await.unwrap();
+    until(&sink, "recovered", |m| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        state_of(m) == Some("idle") && p["running"].is_null() && p["error"].is_null()
+    })
+    .await;
+    core.request(Request::ResumeContour).await.unwrap();
+    until_for(&sink, "closed", 180, |m| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["running"].is_null() && (p["contour"]["closed"] == true || !p["error"].is_null())
+    })
+    .await;
+    let probe = sink.0.lock().unwrap().state.as_ref().unwrap()["probe"].clone();
+    assert!(probe["error"].is_null(), "{probe}");
+    let pts: Vec<[f64; 2]> = probe["contour"]["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| [v[0].as_f64().unwrap(), v[1].as_f64().unwrap()])
+        .collect();
+    assert!(pts.len() > kept, "{} after {kept}", pts.len());
+    let w = wall(&pts, BALL_RADIUS, true);
+    let area = (0..w.len())
+        .map(|i| {
+            let (a, b) = (w[i], w[(i + 1) % w.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum::<f64>()
+        / 2.0;
+    assert!((area - 2000.0).abs() < 2.0, "area {area}");
 }

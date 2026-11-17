@@ -5,9 +5,11 @@ import type { Across } from "@/bindings/Across";
 import type { Corner } from "@/bindings/Corner";
 import type { Routine } from "@/bindings/Routine";
 import type { Side } from "@/bindings/Side";
+import { useStore } from "@/lib/store";
+import type { Transforms } from "@/lib/transform";
 
 /** A routine, or a surface map or contour (which aren't: they run long and keep their points). */
-export type ProbeKind = Routine["kind"] | "map" | "contour";
+export type ProbeKind = Exclude<Routine["kind"], "edgeAngle"> | "map" | "contour";
 
 /** The probing form, kept between uses (and shown as a preview on the bed). */
 export interface ProbeForm {
@@ -20,6 +22,10 @@ export interface ProbeForm {
   reach: number;
   /** Edge: how far to search for it, mm. */
   edgeSearch: number;
+  /** Edge: touch twice along it for its angle too. */
+  edgeAngle: boolean;
+  /** Edge angle: how far apart along the edge the two touches are, mm. */
+  edgeSpan: number;
   boreDiameter: number;
   bossDiameter: number;
   /** Bore and boss: both axes for a centre, or one for a centreline. */
@@ -62,6 +68,8 @@ interface Ui {
   mapView: MapView;
   /** Surface maps: show and export points corrected for the ball touching slopes off its bottom. */
   mapCompensate: boolean;
+  /** The editor's transforms sidebar (rotating and moving the program), while it's open. */
+  transforms: Transforms | null;
 }
 
 const MAP_VIEW_KEY = "hj.mapView";
@@ -87,6 +95,7 @@ export const useUi = create<Ui>(() => ({
   jogSpeed: 0.25,
   mapView: storedMapView(),
   mapCompensate: true,
+  transforms: null,
   probe: {
     kind: "corner",
     side: "left",
@@ -94,6 +103,8 @@ export const useUi = create<Ui>(() => ({
     depth: 3,
     reach: 10,
     edgeSearch: 20,
+    edgeAngle: false,
+    edgeSpan: 30,
     boreDiameter: 10,
     bossDiameter: 10,
     across: "xy",
@@ -114,6 +125,15 @@ export const useUi = create<Ui>(() => ({
   },
 }));
 
+// The map and contour areas are kept in work coordinates; when the work origin moves (from the DRO,
+// a probe result, the console, anywhere), they'd move with it, perhaps off the bed. So they go.
+useStore.subscribe((s, prev) => {
+  const [now, before] = [s.state?.status?.workOffset, prev.state?.status?.workOffset];
+  if (now && before && (now[0] !== before[0] || now[1] !== before[1])) {
+    setProbeForm({ mapMin: null, mapMax: null, contourMin: null, contourMax: null });
+  }
+});
+
 export function setProbeForm(patch: Partial<ProbeForm>) {
   useUi.setState((s) => ({ probe: { ...s.probe, ...patch } }));
 }
@@ -127,7 +147,9 @@ export function routineOf(f: ProbeForm): Routine {
     case "surface":
       return { kind: "surface" };
     case "edge":
-      return { kind: "edge", side: f.side, search: f.edgeSearch };
+      return f.edgeAngle
+        ? { kind: "edgeAngle", side: f.side, search: f.edgeSearch, span: f.edgeSpan }
+        : { kind: "edge", side: f.side, search: f.edgeSearch };
     case "corner":
       return { kind: "corner", corner: f.corner, depth: f.depth, reach: f.reach };
     case "bore":

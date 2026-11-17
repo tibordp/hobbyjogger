@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hj_core::program::{self, Analysis, Program, reference};
+use hj_core::program::{self, Analysis, Program, reference, transform};
 use hj_core::state::{ConsoleEntry, Request, Telemetry};
-use hj_core::{Core, CoreError, Sink, Snapshot, StateUpdate};
+use hj_core::{Core, CoreError, Sink, Snapshot, StateUpdate, dxf, fit};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 struct EventSink(AppHandle);
@@ -41,6 +41,50 @@ async fn request(core: State<'_, Core>, request: Request) -> Result<(), CoreErro
 #[tauri::command]
 async fn analyze_gcode(text: String) -> Analysis {
     tauri::async_runtime::spawn_blocking(move || program::analyze(&text))
+        .await
+        .unwrap_or_default()
+}
+
+/// The program rotated counter-clockwise about Z by `degrees` about `pivot` (program X/Y), or
+/// every line that keeps it from being rotated (see `hj_gcode::transform`).
+#[tauri::command]
+fn rotate_gcode(
+    text: String,
+    degrees: f64,
+    pivot: [f64; 2],
+) -> Result<String, Vec<transform::Problem>> {
+    transform::rotate(&text, degrees, pivot)
+}
+
+/// The program moved by `offset` (program X/Y/Z), or every line that keeps it from being moved.
+#[tauri::command]
+fn translate_gcode(text: String, offset: [f64; 3]) -> Result<String, Vec<transform::Problem>> {
+    transform::translate(&text, offset)
+}
+
+/// The outlines in a DXF drawing (see `hj_core::dxf`).
+#[tauri::command]
+async fn import_dxf(path: PathBuf) -> Result<dxf::Drawing, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let text =
+            std::fs::read(&path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
+        // Older DXFs aren't UTF-8; the geometry is ASCII either way.
+        dxf::parse(&String::from_utf8_lossy(&text))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The ways `reference` (a drawing's closed outline) fits `measured` (where the ball's centre was
+/// at each touch of a traced wall, machine X/Y), best first; `offset` is the ball's radius, negative
+/// for a hole traced from inside (see `hj_core::fit`).
+#[tauri::command]
+async fn fit_outline(
+    reference: Vec<[f64; 2]>,
+    measured: Vec<[f64; 2]>,
+    offset: f64,
+) -> Vec<fit::Fit> {
+    tauri::async_runtime::spawn_blocking(move || fit::fit(&reference, &measured, offset))
         .await
         .unwrap_or_default()
 }
@@ -97,6 +141,10 @@ pub fn run() {
             console_history,
             request,
             analyze_gcode,
+            rotate_gcode,
+            translate_gcode,
+            import_dxf,
+            fit_outline,
             gcode_reference,
             open_program,
             save_program,

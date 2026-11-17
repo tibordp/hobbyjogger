@@ -6,4 +6,4 @@ import type { Side } from "./Side";
 /**
  * What to probe, and from where. Distances are in mm.
  */
-export type Routine = { "kind": "surface" } | { "kind": "edge", side: Side, search: number, } | { "kind": "corner", corner: Corner, depth: number, reach: number, } | { "kind": "bore", diameter: number, across: Across, } | { "kind": "boss", diameter: number, depth: number, across: Across, };
+export type Routine = { "kind": "surface" } | { "kind": "edge", side: Side, search: number, } | { "kind": "edgeAngle", side: Side, search: number, span: number, } | { "kind": "corner", corner: Corner, depth: number, reach: number, } | { "kind": "bore", diameter: number, across: Across, } | { "kind": "boss", diameter: number, depth: number, across: Across, };

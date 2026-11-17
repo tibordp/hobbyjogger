@@ -38,6 +38,7 @@ export function ZBar({ height, pad, onHover }: { height: number; pad: number; on
   const job = useJobRunning();
   const travel = useStore((s) => s.state?.machine?.travel);
   const probe = useStore((s) => s.state?.probe ?? null);
+  const transforms = useUi((s) => s.transforms);
   const analysis = useProgram((s) => s.analysis);
   const speed = useUi((s) => s.jogSpeed);
   const host = useRef<HTMLDivElement>(null);
@@ -95,6 +96,9 @@ export function ZBar({ height, pad, onHover }: { height: number; pad: number; on
   const tool = connected && t ? py(t.machine[2]) : null;
   const zero = connected && offset !== undefined ? py(offset) : null;
   const cut = analysis?.cutBounds && offset !== undefined ? band(analysis.cutBounds.min[2] + offset, analysis.cutBounds.max[2] + offset) : null;
+  // Where translating the program in Z (being set up in the editor's sidebar) would put that.
+  const dz = transforms?.preview === "translate" ? transforms.translate[2] : 0;
+  const movedCut = dz !== 0 && analysis?.cutBounds && offset !== undefined ? band(analysis.cutBounds.min[2] + offset + dz, analysis.cutBounds.max[2] + offset + dz) : null;
   const all = analysis?.bounds && offset !== undefined ? band(analysis.bounds.min[2] + offset, analysis.bounds.max[2] + offset) : null;
   const touched = probe?.result?.z != null && !probe.running ? py(probe.result.z) : null;
 
@@ -143,6 +147,9 @@ export function ZBar({ height, pad, onHover }: { height: number; pad: number; on
           {ticks}
           {all && <rect x={L + 1} width={R - L - 2} {...all} className="pointer-events-none fill-muted-foreground/25" />}
           {cut && <rect x={L + 1} width={R - L - 2} {...cut} className="pointer-events-none fill-fuchsia-400/70" />}
+          {movedCut && (
+            <rect x={L - 2} width={R - L + 4} {...movedCut} fill="none" className="pointer-events-none stroke-amber-300" strokeWidth={1} strokeDasharray="3 2" />
+          )}
           {zero !== null && (
             <line x1={L - 6} y1={zero} x2={R + 6} y2={zero} className="pointer-events-none stroke-emerald-500" strokeWidth={1.5} />
           )}

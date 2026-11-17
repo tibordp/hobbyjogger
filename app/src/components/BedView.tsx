@@ -21,10 +21,12 @@ import {
 import { ZBar } from "@/components/ZBar";
 import { act } from "@/lib/actions";
 import { plannedContour, wallPoints, type V2 } from "@/lib/contour";
+import { distanceTo, placement, selectOutline, useDrawing } from "@/lib/drawing";
 import { canJog, isProbe, useConnected, useJobRunning, useMachineState, useStatus, useWorkOffset } from "@/lib/machine";
 import { fitProblems, useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
 import { heatCss, lattice, nearestPoint, onGrid, plannedSpec, pointAt, pointsRange, probedMask, scaleOf, surfacePoints, type Vec3 as MapPoint } from "@/lib/surfaceMap";
+import { previewOf } from "@/lib/transform";
 import { setMapView, setProbeForm, useUi, type ProbeForm } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -374,6 +376,11 @@ export function BedView() {
       dragged.current = false;
       return;
     }
+    if (hoverOutline !== null) {
+      e.preventDefault();
+      selectOutline(hoverOutline);
+      return;
+    }
     if (hoverPoint !== null && connected) {
       const box = area.current?.getBoundingClientRect();
       if (!box) return;
@@ -496,6 +503,19 @@ export function BedView() {
     const box = b && { x: b.min[0] + ox - minX, y: maxY - (b.max[1] + oy), w: b.max[0] - b.min[0], h: b.max[1] - b.min[1] };
     return { map, done, rest, box };
   }, [analysis, ox, oy, minX, maxY, doneLine]);
+  // The program as a transform in the sidebar would leave it, while that's being set up.
+  const transforms = useUi((s) => s.transforms);
+  const ghost = useMemo(() => {
+    const f = previewOf(transforms);
+    if (!f || !transforms || !analysis || ox === undefined || oy === undefined) return null;
+    const map = (x: number, y: number): [number, number] => {
+      const [tx, ty] = f(x, y, 0);
+      return [tx + ox - minX, maxY - (ty + oy)];
+    };
+    const p = pathData(analysis, 0, analysis.kinds.length, map);
+    const pivot = transforms.preview === "rotate" ? map(...transforms.rotate.pivot) : null;
+    return { feed: p.feed, rapid: p.rapid, pivot };
+  }, [transforms, analysis, ox, oy, minX, maxY]);
   const highlight = useMemo(() => {
     if (!preview || !analysis || cursorLine === null) return null;
     const from = vertexAfterLine(analysis, cursorLine - 1);
@@ -561,6 +581,27 @@ export function BedView() {
     return `Point ${g(i % cols)}, ${g(Math.floor(i / cols))}${what}`;
   };
   const [pointMenu, setPointMenu] = useState<{ target: Target; left: number; top: number } | null>(null);
+  // A reference drawing: its outlines on the bed (by the fit, or at the work origin before), and,
+  // while one is being picked, the one under the pointer.
+  const drawing = useDrawing((s) => s.current);
+  const ox2 = offset?.[0];
+  const oy2 = offset?.[1];
+  const placed = useMemo(() => {
+    const place = drawing && placement(drawing, ox2 === undefined || oy2 === undefined ? null : [ox2, oy2]);
+    return drawing && place ? drawing.drawing.outlines.map((o) => (o.points as V2[]).map(place)) : null;
+  }, [drawing, ox2, oy2]);
+  const pickingOutline = drawing !== null && drawing.fits === null;
+  const hoverOutline = useMemo(() => {
+    if (!pickingOutline || !placed || !hover || drag) return null;
+    let best: number | null = null;
+    let bestD = 6 * k;
+    placed.forEach((pts, i) => {
+      if (!drawing!.drawing.outlines[i].closed) return;
+      const d = distanceTo(pts, true, [hover.x, hover.y]);
+      if (d <= bestD) [best, bestD] = [i, d];
+    });
+    return best;
+  }, [pickingOutline, placed, hover, drag, k, drawing]);
   const problems =
     analysis && offset && travel ? fitProblems(analysis, offset, travel) : [];
 
@@ -732,7 +773,7 @@ export function BedView() {
             <svg
               ref={svg}
               viewBox={`${vb.x} ${vb.y} ${Math.max(vb.w, 1e-6)} ${Math.max(vb.h, 1e-6)}`}
-              className={cn("absolute inset-0 block size-full", connected && (hoverPoint !== null ? "cursor-pointer" : "cursor-crosshair"))}
+              className={cn("absolute inset-0 block size-full", connected && (hoverPoint !== null || hoverOutline !== null ? "cursor-pointer" : "cursor-crosshair"))}
               onMouseMove={(e) => {
                 pointer.current = { clientX: e.clientX, clientY: e.clientY };
                 setHover(toMachine(e));
@@ -770,6 +811,13 @@ export function BedView() {
                   {highlight && <path d={highlight} className="stroke-yellow-300" strokeWidth={2.5 * k} />}
                 </g>
               )}
+              {ghost && (
+                <g className="pointer-events-none" fill="none" strokeLinejoin="round" strokeLinecap="round">
+                  <path d={ghost.rapid} className="stroke-amber-300/40" strokeWidth={0.75 * k} strokeDasharray={`${3 * k} ${3 * k}`} />
+                  <path d={ghost.feed} className="stroke-amber-300" strokeWidth={1.25 * k} strokeDasharray={`${5 * k} ${3 * k}`} />
+                  {ghost.pivot && <circle cx={ghost.pivot[0]} cy={ghost.pivot[1]} r={4 * k} className="stroke-amber-300" strokeWidth={1.5 * k} />}
+                </g>
+              )}
               {probe && <ProbeOverlay probe={probe} sx={sx} sy={sy} h={h} w={w} k={k} />}
             {measured}
             {hoverPoint !== null && (() => {
@@ -787,6 +835,31 @@ export function BedView() {
                 strokeWidth={k}
                 strokeDasharray={`${4 * k} ${3 * k}`}
               />
+            )}
+            {drawing && placed && (
+              <g className="pointer-events-none" fill="none" strokeLinejoin="round">
+                {placed.map((pts, i) => {
+                  const o = drawing.drawing.outlines[i];
+                  const d = pts.map(([x, y], j) => `${j ? "L" : "M"}${sx(x)} ${sy(y)}`).join("") + (o.closed ? "Z" : "");
+                  const picked = i === drawing.selected;
+                  const cls = picked
+                    ? "stroke-violet-300"
+                    : i === hoverOutline
+                      ? "stroke-violet-300/80"
+                      : o.closed
+                        ? "stroke-violet-400/50"
+                        : "stroke-violet-400/30";
+                  return (
+                    <path
+                      key={i}
+                      d={d}
+                      className={cls}
+                      strokeWidth={(picked || i === hoverOutline ? 2 : 1) * k}
+                      strokeDasharray={o.closed ? undefined : `${3 * k} ${3 * k}`}
+                    />
+                  );
+                })}
+              </g>
             )}
             {contour && contourWall.length > 0 && (
               <g className="pointer-events-none">

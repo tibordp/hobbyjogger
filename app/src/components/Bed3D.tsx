@@ -14,6 +14,7 @@ import { useConnected, useJobRunning } from "@/lib/machine";
 import { useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
 import { cellRims, heat, pointsRange, probedMask, surfacePoints, zRange, type Vec3 as MapPoint } from "@/lib/surfaceMap";
+import { previewOf } from "@/lib/transform";
 import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -54,6 +55,7 @@ function themeColors() {
     tool: cssColor("#38bdf8"), // sky-400
     contact: cssColor("#7dd3fc"), // sky-300
     contour: cssColor("#34d399"), // emerald-400, as in 2D
+    ghost: cssColor("#fcd34d"), // amber-300, as in 2D
     x: cssColor("#f87171"),
     y: cssColor("#4ade80"),
     z: cssColor("#60a5fa"),
@@ -187,6 +189,12 @@ export default function Bed3D() {
   useEffect(() => api?.setBed(bed), [api, bed]);
   useEffect(() => api?.setOrigin(offset), [api, offset]);
   useEffect(() => api?.setProgram(analysis, offset), [api, analysis, offset]);
+  // The program as a transform in the sidebar would leave it, while that's being set up (as in 2D).
+  const transforms = useUi((s) => s.transforms);
+  useEffect(() => {
+    const f = previewOf(transforms);
+    api?.setGhost(f && analysis && offset ? { analysis, offset, f } : null);
+  }, [api, transforms, analysis, offset]);
   useEffect(() => api?.setDone(analysis && doneLine > 0 ? vertexAfterLine(analysis, doneLine) : 0), [api, analysis, doneLine, offset]);
   useEffect(() => {
     if (!api) return;
@@ -357,7 +365,8 @@ function setup(el: HTMLDivElement) {
   let contacts: THREE.Points | null = null;
   const surface = new THREE.Group();
   const outline = new THREE.Group();
-  scene.add(surface, outline);
+  const ghost = new THREE.Group();
+  scene.add(surface, outline, ghost);
 
   const clear = (g: THREE.Object3D) => {
     for (const c of [...g.children]) {
@@ -526,6 +535,32 @@ function setup(el: HTMLDivElement) {
       }
       render();
     },
+    /** The program with `f` applied to its points (program X/Y/Z), dashed. */
+    setGhost(g: { analysis: Analysis; offset: Vec3; f: (x: number, y: number, z: number) => [number, number, number] } | null) {
+      clear(ghost);
+      if (g) {
+        const { analysis: a, offset: o, f } = g;
+        const at = (j: number) => {
+          const [x, y, z] = f(a.points[j * 3], a.points[j * 3 + 1], a.points[j * 3 + 2]);
+          return [x + o[0], y + o[1], z + o[2]];
+        };
+        for (const rapid of [true, false]) {
+          const pos: number[] = [];
+          for (let i = 1; i < a.kinds.length; i++) {
+            if (a.kinds[i] === JUMP || (a.kinds[i] === RAPID) !== rapid) continue;
+            pos.push(...at(i - 1), ...at(i));
+          }
+          const line = lines(
+            pos,
+            new THREE.LineDashedMaterial({ color: colors.ghost, dashSize: 1.5, gapSize: 1, transparent: true, opacity: rapid ? 0.4 : 1, depthTest: false }),
+          );
+          line.computeLineDistances();
+          line.renderOrder = 3;
+          ghost.add(line);
+        }
+      }
+      render();
+    },
     /** A contour: its points, joined (round, once closed). */
     setContour(points: Vec3[] | null, closed: boolean) {
       clear(outline);
@@ -573,7 +608,7 @@ function setup(el: HTMLDivElement) {
       ro.disconnect();
       controls.dispose();
       for (const p of paths) p.dispose();
-      for (const g of [bedGroup, origin, program, marks, surface, outline]) clear(g);
+      for (const g of [bedGroup, origin, program, marks, surface, outline, ghost]) clear(g);
       for (const m of [feed, feedDone, rapid, rapidDone, highlight]) m.dispose();
       renderer.dispose();
       renderer.domElement.remove();

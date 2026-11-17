@@ -197,4 +197,11 @@ depth probe really is T0, and that it triggers with `M494.1` sent (and not witho
   as triggered. Hobby Jogger moves a further 0.5 mm with a plain move after every release, back
   the way the probe came.
 - `M119` ends its line with `Probe: 0|1`: the probe's state now. Hobby Jogger reads it before each
-  `G38.5`, and Recover does nothing more when the probe has already let go.
+  `G38.5`, and Recover does nothing more when the probe has already let go. The Z1 sometimes leaves
+  the probe out (seen: the endstops and pins, then `ok`; the next `M119` had it), so it asks up to
+  three times, and after a touch takes no answer as still pressed.
+- A guarded move that touches before moving at all, where the probe last let go or while it reads
+  free, is the chatter again (seen after a halt partway through letting go): it steps 0.5 mm on
+  with a plain move and carries on guarded. Anywhere else an instant touch is a real one.
+- Right after a halt the status can still read as running, and the firmware refuses everything
+  (`!!`) until `$X`; Recover always sends `$X` first.

@@ -569,6 +569,9 @@ pub enum Request {
     TraceContour {
         spec: ContourSpec,
     },
+    /// Carry on with a contour that stopped partway (after Recover, say), from its last touches. The
+    /// probe must be back at the height it was tracing at.
+    ResumeContour,
     /// Forget the contour.
     DiscardContour,
     /// Write the contour to `path` in work coordinates: CSV, TSV or DXF. With `compensate`, on the

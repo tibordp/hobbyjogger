@@ -226,7 +226,46 @@ margin), steps along by the spacing and probes back toward the wall. A touch on 
 means the wall bent in sooner; no touch means it bent away: the step is halved, retracing the path
 each time, until it's within about a ball radius of the corner, then it swings back toward the last
 touch (aimed a little into the material) to find the face round it. It's done back by the first
-touch with a full turn behind it, and fails if it leaves the box or passes 5000 points. Points are
+touch with a full turn behind it, and fails if it leaves the box or passes 5000 points. A trace that
+stops partway (a halt, a refusal) keeps its touches; after Recover, Resume carries on from the last
+two (their direction gives the wall's), at the same height. Points are
 ball centres; compensation moves each a ball radius toward the material, square to the line through
 its neighbours (`contour::wall`, mirrored in `app/src/lib/contour.ts`). Export is CSV/TSV or an R12
 DXF with one closed polyline, in work coordinates, at the height the ball touched the wall.
+
+### Transforming programs
+
+There's no `G68` on the Z1, and no rotation kept anywhere as state: a part that sits turned is
+dealt with by rotating the program's text (`hj_gcode::rotate`), so what's in the editor is what
+runs, and the preview shows it lined up with what was probed. The work origin still carries the
+translation. Rotating is all or nothing: if any line can't be rotated exactly (an arc outside the
+XY plane, the A axis, G10/G92 in the program, probing moves, X/Y on G28/G30, or a one-axis move
+before the other axis is known), nothing changes and those lines are listed. Otherwise only X/Y
+and arc-centre I/J words change (moves get both X and Y; incremental moves and incremental arc
+centres rotate as vectors), a comment at the top says what was done, and it's one undo step in the
+editor. The editor's rotate bar shows the rotated program dashed on the map before it's applied.
+The angle can come from the edge-angle routine: two touches `span` apart along an edge, giving how
+far the part is turned (counter-clockwise positive), and "Rotate program by this" on its result.
+
+Translating (`hj_gcode::transform::translate`) works the same way, by a relative X/Y/Z offset:
+absolute positions move (X/Y/Z on moves, canned cycles' R and Z levels, absolute arc centres);
+incremental values, G53 moves and arc radii stay; G10/G92, probing and G28/G30 by way of a position
+are refused. Its main use is Z: a program whose Z0 is the stock's bottom, moved by minus the stock's
+thickness, has its Z0 on the top. Both are cards in the editor's Transform sidebar; the card changed
+last is previewed dashed in 2D, 3D and (for Z) on the Z bar.
+
+### Fitting a drawing
+
+A DXF's outlines (`hj_core::dxf`: lines, arcs, circles, polylines with bulges, blocks expanded,
+units from `$INSUNITS` converted to mm, arcs as chords within 5 µm; pieces whose ends meet are
+chained, closed outlines inside an odd number of others are holes; splines and the like are counted
+as not read) can be fitted to a closed contour (`hj_core::fit`): point-to-line ICP of the traced ball
+centres (raw) onto the picked outline offset by the ball's radius (outward round a part, into a
+hole: exactly where the centres lie, arcs round outside corners included, with no per-point
+estimate of the wall's direction as compensation needs), from 12 starting angles with the centres
+together, coarse then fine, keeping distinct results so a symmetrical part offers its other fits.
+The result is where the drawing's origin is (machine X/Y) and how it's turned. Using it sets the
+work X/Y origin there and opens the Rotate card with the angle, so the program, drawn like the DXF,
+is turned to match by rewriting it, as for any rotation. Reading and fitting are stateless Tauri
+commands; the drawing, the picked outline and the fits live in the frontend (`lib/drawing.ts`),
+which draws them on the 2D map: at the work origin before fitting, where the fit puts them after.

@@ -50,7 +50,17 @@ let initialText = "";
 /** Reads the editor's current text; registered by the editor. */
 let textSource: () => string = () => initialText;
 
+/** Replaces the editor's text as one undoable edit; registered by the editor. */
+let textReplacer: ((text: string) => void) | null = null;
+
 export const takeInitialText = () => initialText;
+export function registerTextReplacer(f: ((text: string) => void) | null) {
+  textReplacer = f;
+}
+/** Swap the whole program for `text` (one undo step back to what it was). */
+export function replaceText(text: string) {
+  textReplacer?.(text);
+}
 export function registerTextSource(f: () => string) {
   textSource = f;
 }

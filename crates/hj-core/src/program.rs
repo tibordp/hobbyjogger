@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 use ts_rs::TS;
 
-pub use hj_gcode::{Analysis, analyze, reference};
+pub use hj_gcode::{Analysis, analyze, reference, transform};
 
 /// Larger files are refused: the editor and preview aren't built for them.
 pub const MAX_SIZE: u64 = 64 * 1024 * 1024;

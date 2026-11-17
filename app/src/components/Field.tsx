@@ -12,6 +12,7 @@ export function Field({
   title,
   signed = false,
   unit = "mm",
+  unitClassName,
   className,
 }: {
   label: string;
@@ -20,6 +21,8 @@ export function Field({
   title?: string;
   signed?: boolean;
   unit?: string;
+  /** For lining up a column of fields whose units differ (a fixed width, say). */
+  unitClassName?: string;
   className?: string;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
@@ -38,7 +41,7 @@ export function Field({
         }}
         onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
       />
-      {unit}
+      {unitClassName ? <span className={unitClassName}>{unit}</span> : unit}
     </label>
   );
 }

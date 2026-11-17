@@ -129,7 +129,7 @@ impl Io {
     /// A probe move by `d` (X/Y): where the ball's centre was if it touched, after which it has
     /// backed off the way it came.
     async fn feel(&mut self, d: V, feed: f64) -> Result<Option<V>> {
-        if len(d) < 1e-4 || !self.probe_move("G38.3", xyz(d), feed).await? {
+        if len(d) < 1e-4 || !self.guarded(xyz(d), feed).await? {
             return Ok(None);
         }
         let at = self.xy();
@@ -145,7 +145,8 @@ impl Io {
 }
 
 /// Trace `spec` from where the probe is, sending each touch as it comes. Returns when it's closed.
-pub(crate) async fn trace(io: &mut Io, spec: &ContourSpec) -> Result<()> {
+/// `so_far`: touches from a trace that stopped partway, to carry on from (empty to start).
+pub(crate) async fn trace(io: &mut Io, spec: &ContourSpec, so_far: &[V]) -> Result<()> {
     let r = io.settings.ball_diameter / 2.0;
     let s = spec.spacing;
     // How finely a corner is closed in on before going round it.
@@ -153,29 +154,41 @@ pub(crate) async fn trace(io: &mut Io, spec: &ContourSpec) -> Result<()> {
     let fast = io.settings.fast_feed;
     let travel = io.settings.travel_feed;
 
-    // The first touch, and which way the material is from it.
-    io.step("Finding the wall");
-    let start = io.xy();
-    let (dir, reach) = if spec.inside {
-        ([0.0, -1.0], spec.search)
-    } else {
-        let centre = mul(add(spec.min, spec.max), 0.5);
-        (unit(sub(centre, start)), len(sub(centre, start)))
-    };
-    let first = io.feel(mul(dir, reach), fast).await?.ok_or_else(|| {
-        if spec.inside {
-            format!("no wall within {:.1} mm in front (−Y)", spec.search)
-        } else {
-            "nothing found toward the middle of the box".to_string()
+    let mut points: Vec<V> = so_far.to_vec();
+    // Toward the material from the last touch, how far round it's turned, and its direction.
+    let (mut turned, mut heading) = (0.0, None::<V>);
+    let mut m = if points.len() >= 2 {
+        // Carrying on: all that from the touches so far.
+        for w in points.windows(2) {
+            let h = unit(sub(w[1], w[0]));
+            if let Some(prev) = heading {
+                turned += turn(prev, h);
+            }
+            heading = Some(h);
         }
-    })?;
-    let _ = io.updates.send(Update::ContourPoint(first));
-
-    let mut points = vec![first];
-    // Toward the material from the last touch.
-    let mut m = dir;
-    let mut turned = 0.0;
-    let mut heading: Option<V> = None;
+        left(heading.unwrap())
+    } else {
+        // The first touch, and which way the material is from it.
+        io.step("Finding the wall");
+        let start = io.xy();
+        let (dir, reach) = if spec.inside {
+            ([0.0, -1.0], spec.search)
+        } else {
+            let centre = mul(add(spec.min, spec.max), 0.5);
+            (unit(sub(centre, start)), len(sub(centre, start)))
+        };
+        let first = io.feel(mul(dir, reach), fast).await?.ok_or_else(|| {
+            if spec.inside {
+                format!("no wall within {:.1} mm in front (−Y)", spec.search)
+            } else {
+                "nothing found toward the middle of the box".to_string()
+            }
+        })?;
+        let _ = io.updates.send(Update::ContourPoint(first));
+        points = vec![first];
+        dir
+    };
+    let first = points[0];
     loop {
         if points.len() > MAX_POINTS {
             return Err(format!(
@@ -241,7 +254,7 @@ pub(crate) async fn trace(io: &mut Io, spec: &ContourSpec) -> Result<()> {
         }
         let h = unit(step);
         if let Some(prev) = heading {
-            turned += (prev[0] * h[1] - prev[1] * h[0]).atan2(prev[0] * h[0] + prev[1] * h[1]);
+            turned += turn(prev, h);
         }
         heading = Some(h);
         m = left(h);
@@ -255,13 +268,18 @@ pub(crate) async fn trace(io: &mut Io, spec: &ContourSpec) -> Result<()> {
     }
 }
 
+/// The signed angle from direction `a` to `b`, counter-clockwise positive.
+fn turn(a: V, b: V) -> f64 {
+    (a[0] * b[1] - a[1] * b[0]).atan2(a[0] * b[0] + a[1] * b[1])
+}
+
 fn inside_box(spec: &ContourSpec, p: V) -> bool {
     (spec.min[0]..=spec.max[0]).contains(&p[0]) && (spec.min[1]..=spec.max[1]).contains(&p[1])
 }
 
 /// Run a trace as the routine task.
-pub(crate) async fn run(spec: ContourSpec, mut io: Io) {
-    let result = trace(&mut io, &spec).await;
+pub(crate) async fn run(spec: ContourSpec, so_far: Vec<V>, mut io: Io) {
+    let result = trace(&mut io, &spec, &so_far).await;
     let _ = io.updates.send(Update::ContourDone(result));
 }
 
