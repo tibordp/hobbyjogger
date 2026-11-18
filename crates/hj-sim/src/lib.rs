@@ -218,6 +218,11 @@ struct Machine {
     released_at: Option<[f64; 3]>,
     /// M119s answered, for leaving the probe out of some.
     m119s: u32,
+    /// A compliant part (`sim-springy` toggles it): a touch stops right where the probe trips, so
+    /// once `M119` has said it's pressed, the part springs back and lets it go.
+    springy: bool,
+    /// Where it sprang back: the probe reads free there.
+    relaxed_at: Option<[f64; 3]>,
     /// Feed and spindle overrides, %.
     feed_override: f64,
     spindle_override: f64,
@@ -273,6 +278,8 @@ impl Default for Machine {
             probe_report: None,
             released_at: None,
             m119s: 0,
+            springy: false,
+            relaxed_at: None,
             feed_override: 100.0,
             spindle_override: 100.0,
             laser_mode: false,
@@ -460,7 +467,7 @@ impl Machine {
         let toward = code == 382 || code == 383;
         // As the firmware: toward needs the probe free and away needs it triggered, or it's a
         // halt (with a message that says "triggered" either way).
-        if touches_part([start[0], start[1], start[2]]) == toward {
+        if self.contact([start[0], start[1], start[2]]) == toward {
             out.push("Error:ZProbe triggered before move, aborting command.\n".into());
             self.halt_with(3);
             return;
@@ -688,6 +695,11 @@ impl Machine {
                 };
                 return vec!["Smoothie out. Peace. Rebooting in 5 seconds...\r\n".into()];
             }
+            // Not a firmware command: see `springy`.
+            "sim-springy" => {
+                self.springy = !self.springy;
+                out.push("ok\n".into());
+            }
             "$X" | "M999" => {
                 self.halt = None;
                 out.push("[Caution: Unlocked]\nok\n".into());
@@ -801,13 +813,18 @@ impl Machine {
             Some(1190) => {
                 self.m119s += 1;
                 let p = self.planned();
+                let tip = [p[0], p[1], p[2]];
+                let pressed = self.contact(tip);
                 if self.m119s.is_multiple_of(3) {
                     out.push("X_max:0 Y_max:0 Z_max:0 A_min:1 pins- (XL)P0.24:0\n".into());
                 } else {
                     out.push(format!(
                         "X_max:0 Y_max:0 Z_max:0 Probe: {}\n",
-                        u8::from(touches_part([p[0], p[1], p[2]]))
+                        u8::from(pressed)
                     ));
+                }
+                if self.springy && pressed {
+                    self.relaxed_at = Some(tip);
                 }
             }
             Some(2200) => self.feed_override = s_word.unwrap_or(100.0).clamp(10.0, 1000.0),
@@ -1013,6 +1030,16 @@ impl Machine {
     }
 }
 
+impl Machine {
+    /// Whether the probe reads triggered with its tip at `tip`.
+    fn contact(&self, tip: [f64; 3]) -> bool {
+        let sprang = self
+            .relaxed_at
+            .is_some_and(|r| (0..3).all(|i| (r[i] - tip[i]).abs() < 1e-6));
+        !sprang && touches_part(tip)
+    }
+}
+
 /// A running simulator. Dropping it doesn't stop the background tasks; they end with the runtime.
 pub struct Simulator {
     pub addr: SocketAddr,
@@ -1128,13 +1155,21 @@ async fn serve(
             }
         }
     });
-    tokio::spawn(async move {
+    let writing = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
             if writer.write_all(&frame.encode()).await.is_err() {
                 return;
             }
         }
     });
+    // Closes the connection when `serve` returns.
+    struct Abort(tokio::task::JoinHandle<()>);
+    impl Drop for Abort {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _writing = Abort(writing);
     let mut upload: Option<Upload> = None;
     // A download in progress: the path and the file's contents.
     let mut download: Option<(String, Vec<u8>)> = None;
@@ -1149,6 +1184,10 @@ async fn serve(
         decoder.push(&buf[..n]);
         while let Some(item) = decoder.next() {
             let Ok(frame) = item else { continue };
+            // Not a firmware command: drops the connection, as a flaky link would.
+            if String::from_utf8_lossy(&frame.payload).trim() == "sim-drop-link" {
+                return Ok(());
+            }
             if frame.kind == FrameType::FILE_START
                 && let Some(path) = String::from_utf8_lossy(&frame.payload)
                     .trim()

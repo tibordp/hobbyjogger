@@ -8,8 +8,9 @@ pub mod fit;
 pub mod map;
 pub mod probe;
 pub mod program;
+mod saved;
 pub mod settings;
 pub mod state;
 pub mod sync;
 
-pub use crate::core::{Core, CoreError, Sink, Snapshot, StateUpdate};
+pub use crate::core::{Core, CoreError, Notice, Sink, Snapshot, StateUpdate};

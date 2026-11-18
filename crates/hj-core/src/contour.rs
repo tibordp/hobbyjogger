@@ -65,7 +65,7 @@ impl ContourSpec {
 }
 
 /// A contour, traced or being traced.
-#[derive(Clone, Debug, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct Contour {

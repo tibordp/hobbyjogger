@@ -292,6 +292,18 @@ impl Io {
             } else if line == "ok" {
                 break;
             } else if lower.starts_with("error") || lower.starts_with("alarm") || line == "!!" {
+                if line.contains(PRECHECK) {
+                    // Refused before moving; its `ok` follows, which mustn't be taken for the
+                    // next command's.
+                    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                        while let Some(l) = self.lines.recv().await {
+                            if l == "ok" {
+                                break;
+                            }
+                        }
+                    })
+                    .await;
+                }
                 return Err(format!("the machine reported: {line}"));
             }
         }
@@ -390,8 +402,20 @@ impl Io {
             // after a halt may not even point away from anything).
             return Ok(true);
         }
-        if !self.probe_move("G38.5", delta, feed).await? {
-            return Ok(false);
+        match self.probe_move("G38.5", delta, feed).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            // It let go between the M119 and the move: a touch stops right where the probe trips,
+            // and a compliant part (or a ball resting on a slope) can spring back off it. The
+            // firmware refused before moving and halted, so nothing moved: unlock, and if it
+            // reads free, that's released where it is.
+            Err(e) if e.contains(PRECHECK) => {
+                self.command("$X").await?;
+                if self.triggered().await? != Some(false) {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
         }
         self.released_at = Some(self.here);
         let len = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
@@ -610,6 +634,9 @@ pub const BACK_OFF: f64 = 5.0;
 
 /// How far past where the probe lets go [`Io::let_go`] moves, clear of the chatter there, mm.
 pub const LET_GO: f64 = 0.5;
+/// What the firmware says when a probe move's check of the probe fails (toward something with it
+/// pressed, or away with it free; the text is the same either way), before moving and halting.
+const PRECHECK: &str = "ZProbe triggered before move";
 
 /// A touch closer than this to where a move started is taken as chatter ([`Io::guarded`]), mm.
 const CHATTER: f64 = 0.02;

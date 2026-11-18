@@ -54,7 +54,7 @@ pub struct MapSpec {
 }
 
 /// A surface map, measured or being measured.
-#[derive(Clone, Debug, PartialEq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SurfaceMap {

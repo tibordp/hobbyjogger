@@ -32,6 +32,36 @@ pub struct AppState {
     pub batch: Option<Batch>,
 }
 
+impl AppState {
+    /// What the machine is doing that shouldn't be interrupted (by the computer sleeping, or the
+    /// app quitting), if anything: a job, a probing routine (maps and contours included), a tool
+    /// change, a file transfer or a batch of console lines.
+    pub fn busy(&self) -> Option<String> {
+        if let Some(job) = &self.job {
+            return Some(format!("running {}", job.path));
+        }
+        if self.status.as_ref().is_some_and(|s| s.job.is_some()) {
+            return Some("running a job".into());
+        }
+        if let Some(running) = &self.probe.running {
+            return Some(format!("probing ({})", running.label.to_lowercase()));
+        }
+        if self.tool_change.is_some() {
+            return Some("changing the tool".into());
+        }
+        if let Some(t) = &self.transfer {
+            return Some(match t.direction {
+                TransferDirection::Upload => format!("uploading {}", t.path),
+                TransferDirection::Download => format!("downloading {}", t.path),
+            });
+        }
+        if self.batch.is_some() {
+            return Some("sending console lines".into());
+        }
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -237,6 +267,14 @@ pub enum Connection {
     },
     Connecting {
         target: String,
+    },
+    /// The connection dropped; trying `target` again for a while, until a `Connect` or
+    /// `Disconnect`.
+    Reconnecting {
+        target: String,
+        /// Why it dropped.
+        error: String,
+        attempt: u32,
     },
     Connected {
         target: String,

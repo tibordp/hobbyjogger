@@ -1,6 +1,5 @@
-import { ArrowDownToLine, Copy, Crosshair, Focus, Move, Navigation, TriangleAlert } from "lucide-react";
+import { Crosshair, Focus, MapPin, Move, Trash2, TriangleAlert } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { toast } from "sonner";
 
 import type { Analysis } from "@/bindings/Analysis";
 import type { Corner } from "@/bindings/Corner";
@@ -18,16 +17,18 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { coordsText, PointActions } from "@/components/PointActions";
 import { ZBar } from "@/components/ZBar";
 import { act } from "@/lib/actions";
 import { plannedContour, wallPoints, type V2 } from "@/lib/contour";
 import { distanceTo, placement, selectOutline, useDrawing } from "@/lib/drawing";
 import { canJog, isProbe, useConnected, useJobRunning, useMachineState, useStatus, useWorkOffset } from "@/lib/machine";
+import { addMarker, machinePos, markerLabel, removeMarker, useMarkers } from "@/lib/markers";
 import { fitProblems, useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
 import { heatCss, lattice, nearestPoint, onGrid, plannedSpec, pointAt, pointsRange, probedMask, scaleOf, surfacePoints, type Vec3 as MapPoint } from "@/lib/surfaceMap";
 import { previewOf } from "@/lib/transform";
-import { setMapView, setProbeForm, useUi, type ProbeForm } from "@/lib/ui";
+import { areaOf, type ProbeForm, setMapView, setProbeForm, useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
 const Bed3D = lazy(() => import("@/components/Bed3D"));
@@ -82,8 +83,9 @@ function pathData(a: Analysis, from: number, to: number, map: (x: number, y: num
   return { rapid: out.rapid.join(""), feed: out.feed.join("") };
 }
 
-/** A map point (lattice index) or a contour point (index round it), for hover and its menu. */
-type Target = { kind: "map" | "contour"; i: number };
+/** A map point (lattice index), a contour point (index round it), a marker (index in the list) or
+ * the work origin, for hover and its menu. */
+type Target = { kind: "map" | "contour" | "marker" | "origin"; i: number };
 
 /** Machine X or Y to the drawing's units (mm). */
 type ToSvg = (v: number) => number;
@@ -295,6 +297,8 @@ export function BedView() {
   // The drawing fills the panel. The view is its centre (drawing units) and a zoom, where 1 fits
   // the bed with its margin; the panel's size makes it a view box.
   const [zv, setZv] = useState<{ cx: number; cy: number; zoom: number } | null>(null);
+  const fits = useUi((s) => s.fits);
+  useEffect(() => setZv(null), [fits]);
   const area = useRef<HTMLDivElement>(null);
   const [panel, setPanel] = useState({ w: 0, h: 0 });
   useEffect(() => {
@@ -447,12 +451,13 @@ export function BedView() {
   const endDrag = () => {
     if (!drag) return;
     if (drag.moved && offset) {
-      // To 0.1 mm, in work coordinates.
+      // To 0.1 mm in work coordinates (round numbers in the fields), kept in machine ones.
       const w = (v: number, i: number) => Math.round((v - offset[i]) * 10) / 10;
       const [ax, bx] = [w(drag.from.x, 0), w(drag.to.x, 0)].sort((a, b) => a - b);
       const [ay, by] = [w(drag.from.y, 1), w(drag.to.y, 1)].sort((a, b) => a - b);
       if (bx > ax && by > ay) {
-        setProbeForm(probeForm.kind === "contour" ? { contourMin: [ax, ay], contourMax: [bx, by] } : { mapMin: [ax, ay], mapMax: [bx, by] });
+        const [min, max] = areaOf([ax, ay], [bx, by], offset);
+        setProbeForm(probeForm.kind === "contour" ? { contourMin: min, contourMax: max } : { mapMin: min, mapMax: max });
       }
       dragged.current = true;
     }
@@ -524,8 +529,8 @@ export function BedView() {
     const p = pathData(analysis, from, to, preview.map);
     return p.rapid + p.feed;
   }, [preview, analysis, cursorLine]);
-  const plan = picking && offset && probeForm.kind === "map" ? plannedSpec(probeForm, [offset[0], offset[1]]) : null;
-  const contourBox = picking && offset && probeForm.kind === "contour" ? plannedContour(probeForm, [offset[0], offset[1]]) : null;
+  const plan = picking && probeForm.kind === "map" ? plannedSpec(probeForm) : null;
+  const contourBox = picking && probeForm.kind === "contour" ? plannedContour(probeForm) : null;
   // Drawn again only when the map changes, not with every position report: a map can be thousands
   // of points.
   const compensate = useUi((s) => s.mapCompensate);
@@ -542,13 +547,29 @@ export function BedView() {
     () => (contour ? wallPoints(contour.points as V2[], ball / 2, compensate, contour.closed) : []),
     [contour, ball, compensate],
   );
-  // The map or contour point under the pointer (within a few pixels): highlighted, with its
+  // Markers, where they are on the bed (null for a work one without a work offset). The offset is
+  // rounded so they aren't placed again with every position report.
+  const markers = useMarkers((s) => s.markers);
+  const listHovered = useMarkers((s) => s.hovered);
+  const mOffset = useWorkOffset();
+  const [mo0, mo1, mo2] = (mOffset ?? []).map((v) => Math.round(v * 1e4) / 1e4);
+  const markerAt = useMemo(
+    () => markers.map((m) => machinePos(m, mo0 === undefined ? null : [mo0, mo1, mo2])),
+    [markers, mo0, mo1, mo2],
+  );
+  // The marker, map or contour point under the pointer (within a few pixels): highlighted, with its
   // coordinates, and a click on it opens its own menu.
   const hoverPoint = useMemo((): Target | null => {
     if (!hover || drag) return null;
     const radius = 8 * k;
     let best: Target | null = null;
     let bestD = radius;
+    markerAt.forEach((p, i) => {
+      const d = p ? Math.hypot(p[0] - hover.x, p[1] - hover.y) : Infinity;
+      if (d <= bestD) [best, bestD] = [{ kind: "marker", i }, d];
+    });
+    if (best) return best;
+    if (mo0 !== undefined && Math.hypot(mo0 - hover.x, mo1 - hover.y) <= radius) return { kind: "origin", i: 0 };
     contourWall.forEach(([x, y], i) => {
       const d = Math.hypot(x - hover.x, y - hover.y);
       if (d <= bestD) [best, bestD] = [{ kind: "contour", i }, d];
@@ -556,10 +577,13 @@ export function BedView() {
     if (best || !surfaceMap) return best;
     const i = nearestPoint(surfaceMap, mapProbed, mapPoints, hover.x, hover.y, radius);
     return i === null ? null : { kind: "map", i };
-  }, [surfaceMap, mapProbed, mapPoints, contourWall, hover, drag, k]);
+  }, [surfaceMap, mapProbed, mapPoints, contourWall, markerAt, mo0, mo1, hover, drag, k]);
   /** A point's machine position. A map's: the surface point, or the grid point where there's none.
    * A contour's: on the wall (or where the ball's centre was), and no Z: it's a wall. */
   const pointPos = (p: Target): [number, number, number | null] => {
+    if (p.kind === "marker") return markerAt[p.i]!;
+    // Where work X/Y/Z 0 is, Z for the tool that's in.
+    if (p.kind === "origin") return [mo0, mo1, mo2];
     if (p.kind === "contour") return [...contourWall[p.i], null];
     const q = mapPoints[p.i];
     if (q) return q;
@@ -570,6 +594,8 @@ export function BedView() {
   /** "Point 3, 5" (grid column, row from the front left), and what became of it if there's no
    * surface; or "Contour point 12". */
   const pointLabel = (p: Target) => {
+    if (p.kind === "marker") return markerLabel(markers[p.i], p.i);
+    if (p.kind === "origin") return "Work origin";
     if (p.kind === "contour") return `Contour point ${p.i + 1}`;
     const i = p.i;
     const m = surfaceMap!;
@@ -664,6 +690,11 @@ export function BedView() {
       ) : (
         <div className="flex min-h-0 flex-1 gap-2 overflow-hidden p-2 pr-1">
           <div ref={area} className="relative min-w-0 flex-1">
+            {!connected && (
+              <div className="pointer-events-none absolute top-2 left-1/2 z-10 w-max max-w-[80%] -translate-x-1/2 rounded-md bg-background/80 px-3 py-1.5 text-center text-xs text-muted-foreground ring-1 ring-foreground/10">
+                Not connected
+              </div>
+            )}
             {zoom > 1 && (
               <Button
                 size="xs"
@@ -703,6 +734,10 @@ export function BedView() {
                     <Crosshair /> Set work origin here
                     <DropdownMenuShortcut>X/Y</DropdownMenuShortcut>
                   </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => addMarker([menu.p.x, menu.p.y, null], workOffset)}>
+                    <MapPin /> Add marker here
+                  </DropdownMenuItem>
                 </DropdownMenuContent>
               )}
             </DropdownMenu>
@@ -720,52 +755,34 @@ export function BedView() {
                 <span className="pointer-events-none absolute size-0" style={{ left: pointMenu?.left ?? 0, top: pointMenu?.top ?? 0 }} />
               </DropdownMenuTrigger>
               {pointMenu && (() => {
-                const [x, y, z] = pointPos(pointMenu.target);
-                const coords = (o: readonly number[]) =>
-                  `X${(x - o[0]).toFixed(3)} Y${(y - o[1]).toFixed(3)}${z !== null ? ` Z${(z - o[2]).toFixed(3)}` : ""}`;
-                const copy = (text: string) =>
-                  navigator.clipboard.writeText(text).then(
-                    () => toast(`Copied ${text}`),
-                    () => toast.error("Couldn't copy to the clipboard"),
-                  );
+                const pos = pointPos(pointMenu.target);
+                const { kind, i } = pointMenu.target;
                 return (
                   <DropdownMenuContent align="start" sideOffset={6} className="min-w-60">
                     <DropdownMenuLabel className="font-mono text-xs font-normal">
                       <div className="font-sans font-medium">{pointLabel(pointMenu.target)}</div>
-                      {workOffset && <div>W {coords(workOffset)}</div>}
-                      <div className="text-muted-foreground">M {coords([0, 0, 0])}</div>
+                      {workOffset && <div>W {coordsText(pos, workOffset)}</div>}
+                      <div className="text-muted-foreground">M {coordsText(pos, [0, 0, 0])}</div>
                     </DropdownMenuLabel>
                     <DropdownMenuSeparator />
-                    {z !== null && (
-                      <DropdownMenuItem disabled={!canAct} onSelect={() => void act({ type: "setOrigin", x, y, z })}>
-                        <Crosshair /> Set work origin here
-                        <DropdownMenuShortcut>X/Y/Z</DropdownMenuShortcut>
-                      </DropdownMenuItem>
-                    )}
-                    <DropdownMenuItem disabled={!canAct} onSelect={() => void act({ type: "setOrigin", x, y })}>
-                      <Crosshair /> Set work origin here
-                      <DropdownMenuShortcut>X/Y</DropdownMenuShortcut>
-                    </DropdownMenuItem>
-                    {z !== null && (
-                      <DropdownMenuItem disabled={!canAct} onSelect={() => void act({ type: "setOrigin", z })}>
-                        <ArrowDownToLine /> Set work Z zero here
-                        <DropdownMenuShortcut>Z</DropdownMenuShortcut>
-                      </DropdownMenuItem>
-                    )}
+                    <PointActions
+                      pos={pos}
+                      workOffset={workOffset}
+                      canAct={canAct}
+                      speed={speed}
+                      onMove={(x, y) => moveHere({ x, y })}
+                      isOrigin={kind === "origin"}
+                    />
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem disabled={!canAct} onSelect={() => moveHere({ x, y })}>
-                      <Navigation /> Move head above it
-                      <DropdownMenuShortcut>{Math.round(speed * 100)}%</DropdownMenuShortcut>
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    {workOffset && (
-                      <DropdownMenuItem onSelect={() => void copy(coords(workOffset))}>
-                        <Copy /> Copy work coordinates
+                    {kind === "marker" ? (
+                      <DropdownMenuItem variant="destructive" onSelect={() => removeMarker(markers[i].id)}>
+                        <Trash2 /> Delete marker
+                      </DropdownMenuItem>
+                    ) : (
+                      <DropdownMenuItem onSelect={() => addMarker(pos, workOffset)}>
+                        <MapPin /> Add marker here
                       </DropdownMenuItem>
                     )}
-                    <DropdownMenuItem onSelect={() => void copy(coords([0, 0, 0]))}>
-                      <Copy /> Copy machine coordinates
-                    </DropdownMenuItem>
                   </DropdownMenuContent>
                 );
               })()}
@@ -873,6 +890,36 @@ export function BedView() {
                 ))}
               </g>
             )}
+            {markerAt.map((p, i) => {
+              if (!p) return null;
+              const [x, y] = [sx(p[0]), sy(p[1])];
+              const strong = markers[i].id === listHovered;
+              const r = (strong ? 6 : 4.5) * k;
+              const name = markers[i].name.trim();
+              return (
+                <g key={markers[i].id} className="pointer-events-none">
+                  <path
+                    d={`M${x} ${y - r}L${x + r} ${y}L${x} ${y + r}L${x - r} ${y}Z`}
+                    className={strong ? "fill-amber-300 stroke-background" : "fill-amber-400 stroke-background"}
+                    strokeWidth={k}
+                  />
+                  {name && (
+                    <text
+                      x={x + 8 * k}
+                      y={y}
+                      dominantBaseline="central"
+                      fontSize={11 * k}
+                      className={cn("fill-amber-200 stroke-background", strong && "fill-amber-100")}
+                      strokeWidth={3 * k}
+                      paintOrder="stroke"
+                      strokeLinejoin="round"
+                    >
+                      {name}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
             {drag?.moved && (
               <rect
                 x={sx(Math.min(drag.from.x, drag.to.x))}

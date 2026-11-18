@@ -15,7 +15,7 @@ import { useWorkOffset } from "@/lib/machine";
 import { useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
 import { startRotate } from "@/lib/transform";
-import { setProbeForm, useUi } from "@/lib/ui";
+import { areaOf, cornerSet, cornerShown, setProbeForm, useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
 const FORMATS: { format: ExportFormat; label: string; ext: string; name: string }[] = [
@@ -31,13 +31,13 @@ export function ContourTab({ canStart }: { canStart: boolean }) {
   const running = useStore((s) => s.state?.probe?.running ?? null);
   const cut = useProgram((s) => s.analysis?.cutBounds ?? null);
   const offset = useWorkOffset();
-  const spec = plannedContour(form, offset ? [offset[0], offset[1]] : null);
+  const spec = plannedContour(form);
   const tracing = running !== null && contour !== null && !contour.closed;
 
   const setCorner = (which: "contourMin" | "contourMax", axis: 0 | 1, v: number) => {
-    const p = [...(form[which] ?? form.contourMin ?? form.contourMax ?? [0, 0])] as [number, number];
-    p[axis] = v;
-    setProbeForm({ [which]: p });
+    if (!offset) return;
+    const other = which === "contourMin" ? form.contourMax : form.contourMin;
+    setProbeForm({ [which]: cornerSet(form[which], other, axis, v, offset) });
   };
 
   const start = async () => {
@@ -84,15 +84,19 @@ export function ContourTab({ canStart }: { canStart: boolean }) {
         <div className="grid grid-cols-[auto_auto_auto] items-center justify-start gap-x-2 gap-y-1.5">
           {(["X", "Y"] as const).map((axis, i) => (
             <div key={axis} className="contents">
-              <Field label={axis} signed unit="" value={form.contourMin?.[i] ?? null} onChange={(v) => setCorner("contourMin", i as 0 | 1, v)} title={`Work ${axis} where the box starts`} />
-              <Field label="to" signed value={form.contourMax?.[i] ?? null} onChange={(v) => setCorner("contourMax", i as 0 | 1, v)} title={`Work ${axis} where the box ends`} />
+              <Field label={axis} signed unit="" value={cornerShown(form.contourMin, i as 0 | 1, offset)} onChange={(v) => setCorner("contourMin", i as 0 | 1, v)} title={`Work ${axis} where the box starts`} />
+              <Field label="to" signed value={cornerShown(form.contourMax, i as 0 | 1, offset)} onChange={(v) => setCorner("contourMax", i as 0 | 1, v)} title={`Work ${axis} where the box ends`} />
               {i === 0 ? (
                 <Button
                   size="xs"
                   variant="ghost"
-                  disabled={!cut}
+                  disabled={!cut || !offset}
                   title="Around the area the program in the editor cuts, with 10 mm to spare"
-                  onClick={() => cut && setProbeForm({ contourMin: [cut.min[0] - 10, cut.min[1] - 10], contourMax: [cut.max[0] + 10, cut.max[1] + 10] })}
+                  onClick={() => {
+                    if (!cut || !offset) return;
+                    const [contourMin, contourMax] = areaOf([cut.min[0] - 10, cut.min[1] - 10], [cut.max[0] + 10, cut.max[1] + 10], offset);
+                    setProbeForm({ contourMin, contourMax });
+                  }}
                 >
                   <FileCode /> Program's
                 </Button>

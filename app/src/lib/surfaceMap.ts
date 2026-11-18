@@ -12,15 +12,15 @@ export function count(length: number, spacing: number) {
   return Math.max(2, Math.round(length / spacing) + 1);
 }
 
-/** The grid the form describes, in machine coordinates (`offset` is machine − work). */
-export function plannedSpec(form: ProbeForm, offset: [number, number] | null): MapSpec | null {
-  if (!form.mapMin || !form.mapMax || !offset) return null;
+/** The grid the form describes (machine coordinates, as the area is kept). */
+export function plannedSpec(form: ProbeForm): MapSpec | null {
+  if (!form.mapMin || !form.mapMax) return null;
   const [x0, y0] = form.mapMin;
   const [x1, y1] = form.mapMax;
   if (!(x1 > x0 && y1 > y0)) return null;
   return {
-    min: [x0 + offset[0], y0 + offset[1]],
-    max: [x1 + offset[0], y1 + offset[1]],
+    min: [x0, y0],
+    max: [x1, y1],
     columns: count(x1 - x0, form.mapSpacing),
     rows: count(y1 - y0, form.mapSpacing),
     depth: form.mapDepth,

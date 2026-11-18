@@ -12,6 +12,7 @@ import {
   highlightActiveLineGutter,
   keymap,
   lineNumbers,
+  placeholder,
 } from "@codemirror/view";
 import { FilePlus2, FolderOpen, Locate, Lock, Play, Save, Upload, VectorSquare } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -40,7 +41,7 @@ import {
 import { useStore } from "@/lib/store";
 import { closeTransforms, openTransforms } from "@/lib/transform";
 import { useUi } from "@/lib/ui";
-import { cn } from "@/lib/utils";
+import { cn, MOD } from "@/lib/utils";
 
 /** Highlights the line a running job has reached. */
 const setJobLine = StateEffect.define<number | null>();
@@ -91,6 +92,7 @@ function extensions(): Extension[] {
     closeBrackets(),
     highlightActiveLine(),
     search({ top: true }),
+    placeholder(`Open a program (${MOD}O), drop one on the window, or type G-code here.`),
     lintGutter(),
     jobLine,
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
@@ -201,11 +203,11 @@ export function ProgramEditor() {
         <Button size="sm" variant="ghost" onClick={() => void newProgram()} title="New program">
           <FilePlus2 />
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => void openWithDialog()} title="Open… (⌘O)">
+        <Button size="sm" variant="ghost" onClick={() => void openWithDialog()} title={`Open… (${MOD}O)`}>
           <FolderOpen />
         </Button>
         <MachineFilesDialog />
-        <Button size="sm" variant="ghost" onClick={() => void saveFile()} title={`Save${path ? ` to ${path}` : "…"} (⌘S)`}>
+        <Button size="sm" variant="ghost" onClick={() => void saveFile()} title={`Save${path ? ` to ${path}` : "…"} (${MOD}S)`}>
           <Save />
         </Button>
         <Input

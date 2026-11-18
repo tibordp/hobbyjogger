@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useDefaultLayout } from "react-resizable-panels";
 import { toast } from "sonner";
 
+import { AboutDialog } from "@/components/AboutDialog";
 import { BedView } from "@/components/BedView";
 import { ConnectionBar } from "@/components/ConnectionBar";
 import { ConsolePanel } from "@/components/ConsolePanel";
@@ -13,10 +14,12 @@ import { JobPanel } from "@/components/JobPanel";
 import { JogPanel } from "@/components/JogPanel";
 import { LaserPanel } from "@/components/LaserPanel";
 import { MachineControls } from "@/components/MachineControls";
+import { MarkersPanel } from "@/components/MarkersPanel";
 import { ProbePanel } from "@/components/ProbePanel";
 import { ProgramEditor } from "@/components/ProgramEditor";
 import { Panel, ScrollColumn } from "@/components/ScrollColumn";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { TitleTooltips } from "@/components/TitleTooltips";
 import { ToolChangeDialog } from "@/components/ToolChangeDialog";
 import {
   AlertDialog,
@@ -35,7 +38,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { act } from "@/lib/actions";
 import { useConnected } from "@/lib/machine";
-import { isGcodePath, openPath, openWithDialog, saveFile } from "@/lib/program";
+import { isGcodePath, openPath } from "@/lib/program";
 import { useStore } from "@/lib/store";
 
 /** Opens G-code files dropped onto the window; returns the name being dragged in, if any. */
@@ -69,30 +72,11 @@ function useFileDrop() {
   return dragging;
 }
 
-function useShortcuts() {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-      const key = e.key.toLowerCase();
-      if (key === "o") {
-        e.preventDefault();
-        void openWithDialog();
-      } else if (key === "s") {
-        e.preventDefault();
-        void saveFile(e.shiftKey);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-}
-
 export default function App() {
   const ready = useStore((s) => s.state !== null);
   const connected = useConnected();
   const laserIn = useStore((s) => s.state?.status?.laser?.mode === true);
   const dragging = useFileDrop();
-  useShortcuts();
   const mainLayout = useDefaultLayout({ id: "main", panelIds: ["top", "bottom"] });
   const bottomLayout = useDefaultLayout({ id: "bottom", panelIds: ["editor", "console"] });
 
@@ -164,6 +148,9 @@ export default function App() {
                   <Panel name="Machine">
                     <MachineControls />
                   </Panel>
+                  <Panel name="Markers">
+                    <MarkersPanel />
+                  </Panel>
                   {laserIn && (
                     <Panel name="Laser">
                       <LaserPanel />
@@ -212,6 +199,8 @@ export default function App() {
         )}
       </div>
       <ToolChangeDialog />
+      <AboutDialog />
+      <TitleTooltips />
       {/* Error messages are worth copying. */}
       <Toaster position="bottom-right" theme="dark" toastOptions={{ className: "select-text" }} />
     </TooltipProvider>

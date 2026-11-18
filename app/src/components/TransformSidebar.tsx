@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 
 import type { Problem } from "@/bindings/Problem";
 import { Field } from "@/components/Field";
+import { Panel, ScrollColumn } from "@/components/ScrollColumn";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { rotateGcode, translateGcode } from "@/lib/backend";
@@ -22,9 +23,15 @@ export function TransformSidebar() {
   const transforms = useUi((s) => s.transforms);
   if (!transforms) return null;
   return (
-    <aside className="w-60 shrink-0 space-y-2 overflow-y-auto border-l bg-muted/20 p-2">
-      <RotateCard rotate={transforms.rotate} />
-      <TranslateCard translate={transforms.translate} />
+    <aside className="flex w-60 shrink-0 flex-col border-l p-2 pr-1">
+      <ScrollColumn className="h-full">
+        <Panel name="Rotate">
+          <RotateCard rotate={transforms.rotate} />
+        </Panel>
+        <Panel name="Translate">
+          <TranslateCard translate={transforms.translate} />
+        </Panel>
+      </ScrollColumn>
     </aside>
   );
 }

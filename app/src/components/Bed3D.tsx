@@ -11,6 +11,7 @@ import type { SurfaceMap } from "@/bindings/SurfaceMap";
 import { Button } from "@/components/ui/button";
 import { wallPoints, type V2 } from "@/lib/contour";
 import { useConnected, useJobRunning } from "@/lib/machine";
+import { machinePos, useMarkers } from "@/lib/markers";
 import { useFollowing, useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
 import { cellRims, heat, pointsRange, probedMask, surfacePoints, zRange, type Vec3 as MapPoint } from "@/lib/surfaceMap";
@@ -56,6 +57,7 @@ function themeColors() {
     contact: cssColor("#7dd3fc"), // sky-300
     contour: cssColor("#34d399"), // emerald-400, as in 2D
     ghost: cssColor("#fcd34d"), // amber-300, as in 2D
+    marker: cssColor("#fbbf24"), // amber-400, as in 2D
     x: cssColor("#f87171"),
     y: cssColor("#4ade80"),
     z: cssColor("#60a5fa"),
@@ -214,6 +216,18 @@ export default function Bed3D() {
   const my = live ? t.machine[1] : null;
   const mz = live ? t.machine[2] : null;
   useEffect(() => api?.setTool(mx === null || my === null || mz === null ? null : [mx, my, mz], bed.min[2]), [api, mx, my, mz, bed]);
+  // Markers without a Z sit on the floor of the travel box.
+  const markers = useMarkers((s) => s.markers);
+  const listHovered = useMarkers((s) => s.hovered);
+  const placedMarkers = useMemo(
+    () =>
+      markers.flatMap((m) => {
+        const p = machinePos(m, offset);
+        return p ? [{ pos: [p[0], p[1], p[2] ?? bed.min[2]] as Vec3, name: m.name.trim(), strong: m.id === listHovered }] : [];
+      }),
+    [markers, offset, bed, listHovered],
+  );
+  useEffect(() => api?.setMarkers(placedMarkers), [api, placedMarkers]);
   const contacts = probe?.contacts;
   useEffect(() => api?.setContacts(contacts ?? []), [api, contacts]);
   const surfaceMap = probe?.map ?? null;
@@ -326,6 +340,7 @@ function setup(el: HTMLDivElement) {
     frame = requestAnimationFrame(() => {
       frame = 0;
       renderer.render(scene, camera);
+      placeLabels();
     });
   }
 
@@ -362,6 +377,23 @@ function setup(el: HTMLDivElement) {
   let paths: Path[] = [];
   let highlightLine: THREE.LineSegments | null = null;
   let tool: THREE.Group | null = null;
+  // Markers: amber points, and their names as HTML laid over the canvas, placed after each render.
+  let markerDots: THREE.Points | null = null;
+  const labelLayer = document.createElement("div");
+  labelLayer.style.cssText = "position:absolute;inset:0;pointer-events:none;overflow:hidden";
+  el.appendChild(labelLayer);
+  let labels: { el: HTMLDivElement; at: THREE.Vector3 }[] = [];
+  function placeLabels() {
+    const w = el.clientWidth;
+    const h = el.clientHeight;
+    const v = new THREE.Vector3();
+    for (const l of labels) {
+      v.copy(l.at).project(camera);
+      const visible = v.z > -1 && v.z < 1;
+      l.el.style.display = visible ? "" : "none";
+      if (visible) l.el.style.transform = `translate(${((v.x + 1) / 2) * w + 8}px, ${((1 - v.y) / 2) * h}px) translateY(-50%)`;
+    }
+  }
   let contacts: THREE.Points | null = null;
   const surface = new THREE.Group();
   const outline = new THREE.Group();
@@ -474,6 +506,36 @@ function setup(el: HTMLDivElement) {
         (tool.children[1] as THREE.LineSegments).computeLineDistances();
         tool.renderOrder = 4;
         marks.add(tool);
+      }
+      render();
+    },
+    /** Markers at `pos` (machine coordinates); named ones labelled, `strong` the one hovered in the
+     * list. */
+    setMarkers(list: { pos: Vec3; name: string; strong: boolean }[]) {
+      if (markerDots) {
+        marks.remove(markerDots);
+        markerDots.geometry.dispose();
+        (markerDots.material as THREE.Material).dispose();
+        markerDots = null;
+      }
+      labelLayer.replaceChildren();
+      labels = [];
+      if (list.length) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(list.flatMap((m) => m.pos), 3));
+        markerDots = new THREE.Points(g, new THREE.PointsMaterial({ color: colors.marker, size: 8, sizeAttenuation: false, depthTest: false }));
+        markerDots.renderOrder = 5;
+        marks.add(markerDots);
+      }
+      for (const m of list) {
+        if (!m.name && !m.strong) continue;
+        const l = document.createElement("div");
+        l.textContent = m.name;
+        l.className = `absolute top-0 left-0 whitespace-nowrap text-[11px] ${m.strong ? "text-amber-100 font-medium" : "text-amber-200"}`;
+        l.style.textShadow = "0 0 3px var(--background), 0 0 3px var(--background)";
+        if (m.strong && !m.name) l.textContent = "◆";
+        labelLayer.appendChild(l);
+        labels.push({ el: l, at: new THREE.Vector3(...m.pos) });
       }
       render();
     },
@@ -610,6 +672,11 @@ function setup(el: HTMLDivElement) {
       for (const p of paths) p.dispose();
       for (const g of [bedGroup, origin, program, marks, surface, outline, ghost]) clear(g);
       for (const m of [feed, feedDone, rapid, rapidDone, highlight]) m.dispose();
+      if (markerDots) {
+        markerDots.geometry.dispose();
+        (markerDots.material as THREE.Material).dispose();
+      }
+      labelLayer.remove();
       renderer.dispose();
       renderer.domElement.remove();
     },

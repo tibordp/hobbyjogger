@@ -14,7 +14,7 @@ export function Panel({ name, children }: { name: string; children: ReactNode })
  * scrolls to them. macOS hides scrollbars until you scroll, so without this a short window just
  * looks like it has fewer panels.
  */
-export function ScrollColumn({ children }: { children: ReactNode }) {
+export function ScrollColumn({ children, className }: { children: ReactNode; className?: string }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [moreAbove, setMoreAbove] = useState(false);
   const [below, setBelow] = useState<{ more: boolean; names: string[] }>({ more: false, names: [] });
@@ -56,7 +56,7 @@ export function ScrollColumn({ children }: { children: ReactNode }) {
   };
 
   return (
-    <div className="flex min-h-0 flex-col">
+    <div className={cn("flex min-h-0 flex-col", className)}>
       <div className="relative min-h-0 flex-1">
         <div ref={scroller} className="scroll-thin flex h-full flex-col gap-3 overflow-y-auto pr-1 [&>*]:shrink-0">
           {children}

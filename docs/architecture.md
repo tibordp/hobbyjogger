@@ -269,3 +269,33 @@ work X/Y origin there and opens the Rotate card with the angle, so the program, 
 is turned to match by rewriting it, as for any rotation. Reading and fitting are stateless Tauri
 commands; the drawing, the picked outline and the fits live in the frontend (`lib/drawing.ts`),
 which draws them on the 2D map: at the work origin before fitting, where the fit puts them after.
+
+## The app around the machine
+
+- **Busy.** `AppState::busy()` says what shouldn't be interrupted: a job, probing (maps and
+  contours included), a tool change, a transfer or a console batch. The core tells the sink when
+  it changes; the Tauri layer holds an idle-sleep assertion (`keepawake`) while it's set.
+- **Quitting.** Closing the window or quitting (menu, dock) while busy or with unsaved edits is held
+  in Rust and the window asks (`confirm-quit`, then `quit`). The window keeps Rust told about
+  unsaved edits (`set_unsaved`). Quitting never stops the machine.
+- **Notices.** The core reports a job finishing or stopping (aborted, alarm), a surface map or
+  contour finishing or stopping, a tool change a job waits on, and the connection dropping while
+  busy (`Sink::notice`). They show as OS notifications when the window isn't focused.
+- **Reconnecting.** A connection that drops (rather than one closed with `Disconnect`) is tried
+  again, 1 s then doubling to 10 s apart, for two minutes (`Connection::Reconnecting`); a job we
+  started is followed again once back. `Connect` or `Disconnect` stops it. Only drops the
+  transport reports are noticed: there is no reply timeout on the status polls.
+- **Kept between runs.** The core keeps the probe settings and the last surface map and contour in
+  `probing.json` in the app data folder (written a second after they change, whole). The window
+  keeps its own settings in local storage (the probe form, jog step and speed,
+  the map view, the last machine, recent files, panel sizes); the window-state plugin keeps the
+  window's size and place.
+- **Picked areas.** A surface map's area and an outside contour's box are kept in machine
+  coordinates: they stay where they were drawn on the bed when the work origin moves. Their
+  fields show them in work coordinates.
+- **Markers.** Points to come back to, the window's alone (`lib/markers.ts`, in local storage):
+  X/Y/Z (Z optional) kept in work coordinates (they move with the origin) or machine ones (they
+  stay put), switchable. Added at the head, from a map click or from a probed point; drawn on both
+  maps, named ones labelled; on the 2D map they get the same menu as probed points.
+- **Menu.** Native, built in `src-tauri/src/menu.rs`; items only the window can do arrive there as
+  a `menu` event with the item's id.

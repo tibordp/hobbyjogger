@@ -17,6 +17,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { act } from "@/lib/actions";
 import { type Dir, dirKey, press, release, releaseAll, useJogPresses } from "@/lib/jog";
 import { canJog, useConnected, useJobRunning, useMachineState } from "@/lib/machine";
+import { load, save } from "@/lib/persist";
 import { useUi } from "@/lib/ui";
 import { cn } from "@/lib/utils";
 
@@ -87,7 +88,11 @@ export function JogPanel() {
   const state = useMachineState();
   const job = useJobRunning();
   const enabled = connected && canJog(state, job);
-  const [stepIdx, setStepIdx] = useState(2);
+  const [stepIdx, setStepIdx] = useState(() => {
+    const i = load("jogStep", 2);
+    return Number.isInteger(i) && i >= 0 && i < STEPS.length ? i : 2;
+  });
+  useEffect(() => save("jogStep", stepIdx), [stepIdx]);
   const speed = useUi((s) => s.jogSpeed);
   const setSpeed = (jogSpeed: number) => useUi.setState({ jogSpeed });
 

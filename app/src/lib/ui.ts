@@ -5,7 +5,7 @@ import type { Across } from "@/bindings/Across";
 import type { Corner } from "@/bindings/Corner";
 import type { Routine } from "@/bindings/Routine";
 import type { Side } from "@/bindings/Side";
-import { useStore } from "@/lib/store";
+import { load, save } from "@/lib/persist";
 import type { Transforms } from "@/lib/transform";
 
 /** A routine, or a surface map or contour (which aren't: they run long and keep their points). */
@@ -30,7 +30,8 @@ export interface ProbeForm {
   bossDiameter: number;
   /** Bore and boss: both axes for a centre, or one for a centreline. */
   across: Across;
-  /** Map: the area's front-left and back-right corners, work X/Y; null until picked. */
+  /** Map: the area's front-left and back-right corners, machine X/Y (so it stays put on the bed
+   * when the work origin moves; the fields show it in work coordinates); null until picked. */
   mapMin: [number, number] | null;
   mapMax: [number, number] | null;
   /** Map: distance between points, mm (rounded to fit the area evenly). */
@@ -47,7 +48,8 @@ export interface ProbeForm {
   mapTolerance: number;
   /** Contour: a pocket's wall from inside, rather than a part's outline from outside. */
   contourInside: boolean;
-  /** Contour, outside: the box around the part, work X/Y; null until picked. */
+  /** Contour, outside: the box around the part, machine X/Y like the map's area; null until
+   * picked. */
   contourMin: [number, number] | null;
   contourMax: [number, number] | null;
   /** Contour: between touches along the wall, mm. */
@@ -70,7 +72,12 @@ interface Ui {
   mapCompensate: boolean;
   /** The editor's transforms sidebar (rotating and moving the program), while it's open. */
   transforms: Transforms | null;
+  /** Bumped to show the whole bed (View ▸ Show the Whole Bed). */
+  fits: number;
+  aboutOpen: boolean;
 }
+
+export const fitBed = () => useUi.setState((s) => ({ fits: s.fits + 1 }));
 
 const MAP_VIEW_KEY = "hj.mapView";
 
@@ -91,11 +98,18 @@ export function setMapView(mapView: MapView) {
   }
 }
 
-export const useUi = create<Ui>(() => ({
+/** What's remembered between runs. */
+type Remembered = Pick<Ui, "jogSpeed" | "mapCompensate" | "probe">;
+
+const remember = ({ jogSpeed, mapCompensate, probe }: Ui): Remembered => ({ jogSpeed, mapCompensate, probe });
+
+const DEFAULTS: Ui = {
   jogSpeed: 0.25,
   mapView: storedMapView(),
   mapCompensate: true,
   transforms: null,
+  fits: 0,
+  aboutOpen: false,
   probe: {
     kind: "corner",
     side: "left",
@@ -123,16 +137,48 @@ export const useUi = create<Ui>(() => ({
     contourRadius: 3,
     contourSearch: 30,
   },
-}));
+};
 
-// The map and contour areas are kept in work coordinates; when the work origin moves (from the DRO,
-// a probe result, the console, anywhere), they'd move with it, perhaps off the bed. So they go.
-useStore.subscribe((s, prev) => {
-  const [now, before] = [s.state?.status?.workOffset, prev.state?.status?.workOffset];
-  if (now && before && (now[0] !== before[0] || now[1] !== before[1])) {
-    setProbeForm({ mapMin: null, mapMax: null, contourMin: null, contourMax: null });
+export const useUi = create<Ui>(() => {
+  const r = load<Partial<Remembered>>("ui", {});
+  // Defaults first, so settings added since are there too.
+  return { ...DEFAULTS, ...r, probe: { ...DEFAULTS.probe, ...r.probe } };
+});
+
+useUi.subscribe((s, prev) => {
+  if (s.jogSpeed !== prev.jogSpeed || s.mapCompensate !== prev.mapCompensate || s.probe !== prev.probe) {
+    save("ui", remember(s));
   }
 });
+
+const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
+
+/** A picked corner's (machine X/Y) `axis` in work coordinates, for its field; blank without the
+ * work offset (machine − work). */
+export function cornerShown(corner: [number, number] | null, axis: 0 | 1, offset: number[] | null) {
+  // To 1 µm: the positions behind the offset are rounded as reported, which shows past that.
+  return corner && offset ? Math.round((corner[axis] - offset[axis]) * 1e3) / 1e3 : null;
+}
+
+/** `corner` with `axis` set to `work` (a field's value), kept in machine coordinates. A corner not
+ * picked yet starts from `other` (the opposite one), or the work origin. */
+export function cornerSet(
+  corner: [number, number] | null,
+  other: [number, number] | null,
+  axis: 0 | 1,
+  work: number,
+  offset: number[],
+): [number, number] {
+  const p: [number, number] = [...(corner ?? other ?? [offset[0], offset[1]])] as [number, number];
+  p[axis] = r4(work + offset[axis]);
+  return p;
+}
+
+/** A work-coordinate rectangle (a program's extents, say) as an area in machine coordinates. */
+export const areaOf = (min: number[], max: number[], offset: number[]): [[number, number], [number, number]] => [
+  [r4(min[0] + offset[0]), r4(min[1] + offset[1])],
+  [r4(max[0] + offset[0]), r4(max[1] + offset[1])],
+];
 
 export function setProbeForm(patch: Partial<ProbeForm>) {
   useUi.setState((s) => ({ probe: { ...s.probe, ...patch } }));

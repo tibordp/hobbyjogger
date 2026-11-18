@@ -1,4 +1,4 @@
-import { Cable, Cpu, Plug, Unplug, Wifi } from "lucide-react";
+import { Cable, Cpu, LoaderCircle, Plug, Unplug, Wifi } from "lucide-react";
 import { useState } from "react";
 
 import type { ConnectTarget } from "@/bindings/ConnectTarget";
@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { act } from "@/lib/actions";
+import { load, save } from "@/lib/persist";
 import { useStore } from "@/lib/store";
 
 function parseHost(text: string): ConnectTarget | null {
@@ -28,6 +29,19 @@ function parseHost(text: string): ConnectTarget | null {
   return { kind: "tcp", host, port: p };
 }
 
+/** The machine connected to last, to connect to again in one click: a choice in the list, and
+ * the address typed for "Address…". */
+interface Last {
+  choice: string;
+  host: string;
+}
+
+function remembered(): Last {
+  const last = load<Last>("lastMachine", { choice: "", host: "" });
+  // Machines found on the network take a few seconds to show up; until then, by address.
+  return last.choice.includes(":") ? { choice: "manual", host: last.choice } : last;
+}
+
 /** A stable empty list: a selector returning a fresh `[]` would re-render forever. */
 const NONE: DiscoveredMachine[] = [];
 
@@ -35,10 +49,27 @@ export function ConnectionBar() {
   const connection = useStore((s) => s.state?.connection);
   const machine = useStore((s) => s.state?.machine);
   const discovered = useStore((s) => s.state?.discovered ?? NONE);
-  const [choice, setChoice] = useState<string>("");
-  const [host, setHost] = useState("");
+  const [choice, setChoice] = useState(() => remembered().choice);
+  const [host, setHost] = useState(() => remembered().host);
 
   if (!connection) return null;
+
+  if (connection.kind === "reconnecting") {
+    return (
+      <div className="flex items-center gap-3">
+        <Badge variant="outline" className="gap-1.5 border-amber-500/50 text-amber-500">
+          <LoaderCircle className="size-3.5 animate-spin" />
+          Reconnecting to {connection.target}
+        </Badge>
+        <span className="max-w-md truncate text-sm text-muted-foreground" title={connection.error}>
+          {connection.error} · attempt {connection.attempt}
+        </span>
+        <Button variant="ghost" size="sm" onClick={() => act({ type: "disconnect" })}>
+          <Unplug /> Stop
+        </Button>
+      </div>
+    );
+  }
 
   if (connection.kind === "connected") {
     const Icon =
@@ -69,6 +100,9 @@ export function ConnectionBar() {
     return m ? { kind: "tcp", host: m.host, port: m.port } : null;
   };
   const t = target();
+  const connect = async () => {
+    if (t && (await act({ type: "connect", target: t }))) save("lastMachine", { choice, host });
+  };
 
   return (
     <div className="flex items-center gap-2">
@@ -103,13 +137,13 @@ export function ConnectionBar() {
           placeholder="192.168.0.55[:2222]"
           value={host}
           onChange={(e) => setHost(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && t && act({ type: "connect", target: t })}
+          onKeyDown={(e) => e.key === "Enter" && void connect()}
         />
       )}
       <Button
         size="sm"
         disabled={!t || connecting}
-        onClick={() => t && act({ type: "connect", target: t })}
+        onClick={() => void connect()}
       >
         <Plug /> {connecting ? "Connecting…" : "Connect"}
       </Button>

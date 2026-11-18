@@ -6,15 +6,15 @@ import type { ProbeForm } from "@/lib/ui";
 
 export type V2 = [number, number];
 
-/** The contour the form describes, in machine coordinates (`offset` is machine − work). */
-export function plannedContour(form: ProbeForm, offset: V2 | null): ContourSpec | null {
+/** The contour the form describes (machine coordinates, as the box is kept). */
+export function plannedContour(form: ProbeForm): ContourSpec | null {
   const base = { spacing: form.contourSpacing, radius: form.contourRadius, search: form.contourSearch };
   if (form.contourInside) return { inside: true, min: [0, 0], max: [0, 0], ...base };
-  if (!form.contourMin || !form.contourMax || !offset) return null;
+  if (!form.contourMin || !form.contourMax) return null;
   const [x0, y0] = form.contourMin;
   const [x1, y1] = form.contourMax;
   if (!(x1 > x0 && y1 > y0)) return null;
-  return { inside: false, min: [x0 + offset[0], y0 + offset[1]], max: [x1 + offset[0], y1 + offset[1]], ...base };
+  return { inside: false, min: [x0, y0], max: [x1, y1], ...base };
 }
 
 /**

@@ -8,6 +8,7 @@ import type { Analysis } from "@/bindings/Analysis";
 import type { Program } from "@/bindings/Program";
 import type { Travel } from "@/bindings/Travel";
 import { analyzeGcode, downloadProgram, openProgram, saveProgram } from "@/lib/backend";
+import { load as loadSetting, save as saveSetting } from "@/lib/persist";
 import { useStore } from "@/lib/store";
 
 export const GCODE_EXTENSIONS = ["nc", "gcode", "ngc", "gc", "tap", "cnc", "txt"];
@@ -105,6 +106,21 @@ function load(text: string, path: string | null, name: string) {
   void analyzeNow(text);
 }
 
+const RECENT_MAX = 10;
+
+/** Local files opened or saved lately, most recent first (File ▸ Open Recent). */
+export const useRecent = create<{ paths: string[] }>(() => ({
+  paths: loadSetting<string[]>("recentFiles", []).filter((p) => typeof p === "string"),
+}));
+useRecent.subscribe((s) => saveSetting("recentFiles", s.paths));
+
+function addRecent(path: string) {
+  useRecent.setState((s) => ({ paths: [path, ...s.paths.filter((p) => p !== path)].slice(0, RECENT_MAX) }));
+}
+
+export const forgetRecent = (path?: string) =>
+  useRecent.setState((s) => ({ paths: path === undefined ? [] : s.paths.filter((p) => p !== path) }));
+
 /** Ask before throwing away unsaved edits. */
 async function confirmDiscard(): Promise<boolean> {
   const { dirty, name } = useProgram.getState();
@@ -127,8 +143,11 @@ export async function openPath(path: string) {
   try {
     const p: Program = await openProgram(path);
     load(p.text, p.path, p.name);
+    addRecent(path);
   } catch (e) {
     toast.error(String(e));
+    // Moved or deleted, most likely.
+    forgetRecent(path);
   }
 }
 
@@ -188,6 +207,7 @@ export async function saveFile(saveAs = false) {
       // Edits made while saving keep the document dirty.
       dirty: s.version !== version,
     }));
+    addRecent(path);
     toast.success(`Saved ${fileName}`);
   } catch (e) {
     toast.error(String(e));

@@ -13,7 +13,7 @@ import { useWorkOffset } from "@/lib/machine";
 import { useProgram } from "@/lib/program";
 import { useStore } from "@/lib/store";
 import { duration, heatCss, plannedSpec, pointsRange, remainingSecs, surfacePoints } from "@/lib/surfaceMap";
-import { setProbeForm, useUi } from "@/lib/ui";
+import { areaOf, cornerSet, cornerShown, setProbeForm, useUi } from "@/lib/ui";
 
 const FORMATS: { format: ExportFormat; label: string; ext: string; name: string }[] = [
   { format: "csv", label: "CSV", ext: "csv", name: "CSV points" },
@@ -28,13 +28,13 @@ export function MapTab({ canStart }: { canStart: boolean }) {
   const running = useStore((s) => s.state?.probe?.running ?? null);
   const cut = useProgram((s) => s.analysis?.cutBounds ?? null);
   const offset = useWorkOffset();
-  const spec = plannedSpec(form, offset ? [offset[0], offset[1]] : null);
+  const spec = plannedSpec(form);
   const mapping = running !== null && map !== null && running.label === "Surface map";
 
   const setCorner = (which: "mapMin" | "mapMax", axis: 0 | 1, v: number) => {
-    const p: [number, number] = [...(form[which] ?? form.mapMin ?? form.mapMax ?? [0, 0])] as [number, number];
-    p[axis] = v;
-    setProbeForm({ [which]: p });
+    if (!offset) return;
+    const other = which === "mapMin" ? form.mapMax : form.mapMin;
+    setProbeForm({ [which]: cornerSet(form[which], other, axis, v, offset) });
   };
 
   const start = async () => {
@@ -64,15 +64,19 @@ export function MapTab({ canStart }: { canStart: boolean }) {
       <div className="grid grid-cols-[auto_auto_auto] items-center justify-start gap-x-2 gap-y-1.5">
         {(["X", "Y"] as const).map((axis, i) => (
           <div key={axis} className="contents">
-            <Field label={axis} signed value={form.mapMin?.[i] ?? null} onChange={(v) => setCorner("mapMin", i as 0 | 1, v)} unit="" title={`Work ${axis} where the area starts`} />
-            <Field label="to" signed value={form.mapMax?.[i] ?? null} onChange={(v) => setCorner("mapMax", i as 0 | 1, v)} title={`Work ${axis} where the area ends`} />
+            <Field label={axis} signed value={cornerShown(form.mapMin, i as 0 | 1, offset)} onChange={(v) => setCorner("mapMin", i as 0 | 1, v)} unit="" title={`Work ${axis} where the area starts`} />
+            <Field label="to" signed value={cornerShown(form.mapMax, i as 0 | 1, offset)} onChange={(v) => setCorner("mapMax", i as 0 | 1, v)} title={`Work ${axis} where the area ends`} />
             {i === 0 ? (
               <Button
                 size="xs"
                 variant="ghost"
-                disabled={!cut}
+                disabled={!cut || !offset}
                 title="The area the program in the editor cuts"
-                onClick={() => cut && setProbeForm({ mapMin: [cut.min[0], cut.min[1]], mapMax: [cut.max[0], cut.max[1]] })}
+                onClick={() => {
+                  if (!cut || !offset) return;
+                  const [mapMin, mapMax] = areaOf(cut.min, cut.max, offset);
+                  setProbeForm({ mapMin, mapMax });
+                }}
               >
                 <FileCode /> Program's
               </Button>

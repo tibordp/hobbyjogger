@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,6 +25,7 @@ use ts_rs::TS;
 use crate::contour::{self, Contour};
 use crate::map::{self, SurfaceMap};
 use crate::probe::{self, Update};
+use crate::saved::Saved;
 use crate::settings;
 use crate::state::*;
 use crate::sync::{self, Patch};
@@ -57,6 +59,12 @@ const TRANSFER_TIMEOUT: Duration = Duration::from_secs(12);
 const FILE_OP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long after `play` the job may take to show up in the status before we stop waiting.
 const JOB_START_TIMEOUT: Duration = Duration::from_secs(10);
+/// How soon after the probe settings, map or contour change they're saved.
+const SAVE_DELAY: Duration = Duration::from_secs(1);
+/// How long to keep trying to reconnect after the connection drops.
+const RECONNECT_FOR: Duration = Duration::from_secs(120);
+/// The longest wait between reconnection attempts (they start at 1 s and double).
+const RECONNECT_MAX_WAIT: Duration = Duration::from_secs(10);
 /// Console line marking the end of a tool change.
 const DONE_ATC: &str = "Done ATC";
 /// Console line marking the end of an `abort`.
@@ -67,6 +75,27 @@ pub trait Sink: Send + Sync + 'static {
     fn state(&self, update: &StateUpdate);
     fn telemetry(&self, telemetry: &Telemetry);
     fn console(&self, entries: &[ConsoleEntry]);
+    /// What the machine is busy with ([`AppState::busy`]) changed.
+    fn busy(&self, _busy: Option<&str>) {}
+    /// Something the user may want to hear about while looking elsewhere: a job, map or contour
+    /// finished or stopped, a tool to put in, the connection lost mid-way.
+    fn notice(&self, _notice: &Notice) {}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub title: String,
+    pub body: String,
+}
+
+/// "1 h 5 min", "3 min 20 s", "12 s".
+fn span(d: Duration) -> String {
+    let s = d.as_secs();
+    match (s / 3600, s / 60 % 60, s % 60) {
+        (0, 0, s) => format!("{s} s"),
+        (0, m, s) => format!("{m} min {s} s"),
+        (h, m, _) => format!("{h} h {m} min"),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
@@ -134,8 +163,14 @@ pub struct Core {
 }
 
 impl Core {
-    /// Start the core on the current tokio runtime.
+    /// Start the core on the current tokio runtime, keeping nothing between runs.
     pub fn start(sink: Arc<dyn Sink>) -> Self {
+        Self::start_saving(sink, None)
+    }
+
+    /// Start the core, keeping the probe settings, the last surface map and the last contour in
+    /// `saved` (a JSON file) between runs.
+    pub fn start_saving(sink: Arc<dyn Sink>, saved: Option<PathBuf>) -> Self {
         let (tx, rx) = mpsc::channel(64);
         let (routine_tx, routine_rx) = mpsc::unbounded_channel();
         let (disc_tx, disc_rx) = mpsc::channel(16);
@@ -159,7 +194,13 @@ impl Core {
             outgoing: Vec::new(),
             job_started: None,
             job_seen: false,
+            job_aborted: false,
+            last_target: None,
+            reconnect: None,
+            saved,
+            save_due: None,
             routine: None,
+            busy: None,
             routine_lines: None,
             back_off: None,
             routine_tx,
@@ -171,6 +212,11 @@ impl Core {
             batch: VecDeque::new(),
             coasting: None,
         };
+        if let Some(path) = &actor.saved {
+            Saved::load(path).restore(&mut actor.state.probe);
+            // Snapshots taken before the actor first publishes have it too.
+            shared.lock().unwrap().state = actor.state.clone();
+        }
         tokio::spawn(async move {
             match discovery::listen() {
                 Ok(listener) => {
@@ -229,6 +275,11 @@ impl Core {
             seq: s.seq,
             state: s.state.clone(),
         }
+    }
+
+    /// What the machine is busy with, if anything ([`AppState::busy`]).
+    pub fn busy(&self) -> Option<String> {
+        self.shared.lock().unwrap().state.busy()
     }
 
     pub fn console_history(&self) -> Vec<ConsoleEntry> {
@@ -297,7 +348,18 @@ struct Actor {
     job_started: Option<Instant>,
     /// The job we started has shown up in a status report.
     job_seen: bool,
+    /// Where the probe settings, map and contour are kept between runs.
+    saved: Option<PathBuf>,
+    /// When to save them next, having changed.
+    save_due: Option<Instant>,
+    /// What we connected to last, to reconnect to if the connection drops.
+    last_target: Option<ConnectTarget>,
+    reconnect: Option<Reconnect>,
+    /// The job we started was aborted (`aborting` clears once the firmware says it's done).
+    job_aborted: bool,
     routine: Option<ActiveRoutine>,
+    /// What [`AppState::busy`] said last, to tell the sink when it changes.
+    busy: Option<String>,
     /// Console line sink for the routine about to be spawned.
     routine_lines: Option<mpsc::UnboundedSender<String>>,
     /// The way out of the last probe move, should the routine stop there.
@@ -343,6 +405,20 @@ struct ActiveRoutine {
     /// Console lines go to the routine while it runs.
     lines: mpsc::UnboundedSender<String>,
     task: tokio::task::AbortHandle,
+}
+
+/// Trying to get back a connection that dropped.
+struct Reconnect {
+    target: ConnectTarget,
+    /// What the connection bar shows for it.
+    label: String,
+    error: String,
+    since: Instant,
+    next: Instant,
+    attempt: u32,
+    /// The job we started, if it was running: it carries on without us, and is ours again once
+    /// we're back.
+    job: Option<Job>,
 }
 
 async fn next_event(session: &mut Option<Session>) -> Option<Event> {
@@ -415,6 +491,20 @@ impl Actor {
     fn flush(&mut self) {
         let value = serde_json::to_value(&self.state).expect("state serializes");
         if value != self.published {
+            let kept = |v: &Value| {
+                let p = &v["probe"];
+                [
+                    p["settings"].clone(),
+                    p["map"].clone(),
+                    p["contour"].clone(),
+                ]
+            };
+            if self.saved.is_some()
+                && self.save_due.is_none()
+                && kept(&value) != kept(&self.published)
+            {
+                self.save_due = Some(Instant::now() + SAVE_DELAY);
+            }
             let patches = sync::diff(&self.published, &value);
             self.seq += 1;
             {
@@ -427,6 +517,11 @@ impl Actor {
                 patches,
             });
             self.published = value;
+            let busy = self.state.busy();
+            if busy != self.busy {
+                self.sink.busy(busy.as_deref());
+                self.busy = busy;
+            }
         }
         if !self.pending_console.is_empty() {
             let entries = std::mem::take(&mut self.pending_console);
@@ -439,6 +534,10 @@ impl Actor {
             }
             self.sink.console(&entries);
         }
+    }
+
+    fn notify(&self, notice: Notice) {
+        self.sink.notice(&notice);
     }
 
     fn note(&mut self, kind: ConsoleKind, text: String) {
@@ -489,7 +588,19 @@ impl Actor {
     }
 
     async fn poll(&mut self) {
+        self.retry().await;
         let now = Instant::now();
+        if let Some(path) = &self.saved
+            && self.save_due.is_some_and(|t| now >= t)
+        {
+            self.save_due = None;
+            if let Err(e) = Saved::write(&self.state.probe, path) {
+                self.note(
+                    ConsoleKind::Error,
+                    format!("couldn't save the probe settings and maps: {e}"),
+                );
+            }
+        }
         let before = self.discovered.len();
         self.discovered
             .retain(|_, (_, seen)| now.duration_since(*seen) < DISCOVERY_TTL);
@@ -700,6 +811,11 @@ impl Actor {
         // the console started them. The state reads `Idle` for moments during the routine, so
         // only `Done ATC` (or a halt) ends it.
         if state == MachineState::Tool {
+            let was_waiting = self
+                .state
+                .tool_change
+                .as_ref()
+                .is_some_and(|tc| tc.phase == ToolChangePhase::Waiting);
             let target = s.tool.as_ref().and_then(|t| t.target).filter(|&t| t >= 0);
             match &mut self.state.tool_change {
                 Some(tc) if tc.phase != ToolChangePhase::Measuring => {
@@ -715,6 +831,18 @@ impl Actor {
                     });
                 }
             }
+            // Mid-job, the program waits for someone to swap the tool.
+            if let Some(tc) = &self.state.tool_change
+                && tc.phase == ToolChangePhase::Waiting
+                && !was_waiting
+                && self.state.job.is_some()
+            {
+                let body = format!("The job is waiting for tool {}", tc.target);
+                self.notify(Notice {
+                    title: "Tool change".into(),
+                    body,
+                });
+            }
         } else if state == MachineState::Alarm {
             self.state.tool_change = None;
             self.probe_on_after_atc = false;
@@ -728,9 +856,28 @@ impl Actor {
                     .job_started
                     .is_none_or(|t| t.elapsed() > JOB_START_TIMEOUT))
         {
-            self.state.job = None;
+            let job = self.state.job.take().expect("checked above");
+            let name = job.path.rsplit('/').next().unwrap_or(&job.path).to_owned();
+            let took = self.job_started.map(|t| span(t.elapsed()));
             self.job_seen = false;
             self.job_started = None;
+            let aborted = job.aborting || std::mem::take(&mut self.job_aborted);
+            self.notify(if aborted {
+                Notice {
+                    title: "Job stopped".into(),
+                    body: format!("{name} was aborted"),
+                }
+            } else if state == MachineState::Alarm {
+                Notice {
+                    title: "Job stopped".into(),
+                    body: format!("{name}: the machine is in alarm"),
+                }
+            } else {
+                Notice {
+                    title: "Job finished".into(),
+                    body: took.map_or(name.clone(), |t| format!("{name} in {t}")),
+                }
+            });
         }
         if let Some(info) = s.machine {
             let machine = self.state.machine.get_or_insert_default();
@@ -837,12 +984,25 @@ impl Actor {
     }
 
     fn disconnected(&mut self, error: Option<String>) {
+        let label = match &self.state.connection {
+            Connection::Connected { target, .. } => Some(target.clone()),
+            _ => None,
+        };
+        let job = self.state.job.clone();
         let was_up = self.session.take().is_some()
             || !matches!(self.state.connection, Connection::Disconnected { .. });
         if was_up && let Some(e) = &error {
             self.note(ConsoleKind::Error, e.clone());
+            if let Some(busy) = self.state.busy() {
+                self.notify(Notice {
+                    title: "Connection lost".into(),
+                    body: format!("While {busy}: {e}"),
+                });
+            }
         }
-        self.state.connection = Connection::Disconnected { error };
+        self.state.connection = Connection::Disconnected {
+            error: error.clone(),
+        };
         self.state.status = None;
         self.state.machine = None;
         self.state.files = Files::default();
@@ -866,6 +1026,62 @@ impl Actor {
         }
         if self.file_op.is_some() {
             self.file_op_finished(Err("disconnected".into()));
+        }
+        // Dropped rather than closed on purpose: try to get it back.
+        if let (Some(error), Some(label), Some(target)) = (error, label, self.last_target.clone()) {
+            let now = Instant::now();
+            self.state.connection = Connection::Reconnecting {
+                target: label.clone(),
+                error: error.clone(),
+                attempt: 1,
+            };
+            self.reconnect = Some(Reconnect {
+                target,
+                label,
+                error,
+                since: now,
+                next: now + Duration::from_secs(1),
+                attempt: 1,
+                job,
+            });
+        }
+    }
+
+    /// One more attempt at reconnecting, if it's time.
+    async fn retry(&mut self) {
+        let now = Instant::now();
+        if self.reconnect.as_ref().is_none_or(|r| now < r.next) {
+            return;
+        }
+        let r = self.reconnect.take().expect("checked above");
+        match self.connect(r.target.clone()).await {
+            Ok(()) => {
+                self.note(ConsoleKind::Info, "reconnected".into());
+                if let Some(job) = r.job {
+                    self.state.job = Some(job);
+                    self.job_seen = false;
+                }
+            }
+            Err(e) if r.since.elapsed() > RECONNECT_FOR => {
+                self.note(ConsoleKind::Error, format!("gave up reconnecting: {e}"));
+                self.state.connection = Connection::Disconnected {
+                    error: Some(format!("{}; couldn't reconnect", r.error)),
+                };
+            }
+            Err(_) => {
+                let attempt = r.attempt + 1;
+                let wait = Duration::from_secs(1 << attempt.min(4)).min(RECONNECT_MAX_WAIT);
+                self.state.connection = Connection::Reconnecting {
+                    target: r.label.clone(),
+                    error: r.error.clone(),
+                    attempt,
+                };
+                self.reconnect = Some(Reconnect {
+                    attempt,
+                    next: Instant::now() + wait,
+                    ..r
+                });
+            }
         }
     }
 
@@ -927,6 +1143,9 @@ impl Actor {
                 | Request::MoveTo { .. }
         ) {
             self.coasting = None;
+        }
+        if matches!(request, Request::Connect { .. } | Request::Disconnect) {
+            self.reconnect = None;
         }
         match request {
             Request::Connect { target } => self.connect(target).await,
@@ -1088,6 +1307,7 @@ impl Actor {
                 self.require_job()?;
                 if let Some(job) = &mut self.state.job {
                     job.aborting = true;
+                    self.job_aborted = true;
                 }
                 self.send_line("abort").await
             }
@@ -1417,10 +1637,13 @@ impl Actor {
             ConnectTarget::Usb => "USB".into(),
             ConnectTarget::Simulator => "simulator".into(),
         };
-        self.state.connection = Connection::Connecting {
-            target: label.clone(),
-        };
-        self.flush();
+        // While reconnecting, the bar keeps saying so.
+        if !matches!(self.state.connection, Connection::Reconnecting { .. }) {
+            self.state.connection = Connection::Connecting {
+                target: label.clone(),
+            };
+            self.flush();
+        }
 
         let result = match &target {
             ConnectTarget::Tcp { host, port } => {
@@ -1468,6 +1691,7 @@ impl Actor {
             }
         };
         let description = link.description.clone();
+        self.last_target = Some(target);
         self.session = Some(Session {
             link: Link::start(link),
             transport,
@@ -1875,9 +2099,17 @@ impl Actor {
                             c.closed = true;
                         }
                         self.note(ConsoleKind::Info, format!("contour closed: {n} points"));
+                        self.notify(Notice {
+                            title: "Contour traced".into(),
+                            body: format!("Closed after {n} points"),
+                        });
                     }
                     Err(e) => {
                         self.note(ConsoleKind::Error, format!("tracing stopped: {e}"));
+                        self.notify(Notice {
+                            title: "Contour tracing stopped".into(),
+                            body: e.clone(),
+                        });
                         self.state.probe.error = Some(e);
                         self.state.probe.can_back_off = self.back_off.is_some();
                     }
@@ -1922,13 +2154,12 @@ impl Actor {
                         if unreached > 0 {
                             missed += &format!(", {unreached} out of the stylus' reach");
                         }
-                        self.note(
-                            ConsoleKind::Info,
-                            format!(
-                                "surface map done: {} points, {range}{missed}",
-                                m.probed.len()
-                            ),
-                        );
+                        let body = format!("{} points, {range}{missed}", m.probed.len());
+                        self.note(ConsoleKind::Info, format!("surface map done: {body}"));
+                        self.notify(Notice {
+                            title: "Surface map done".into(),
+                            body,
+                        });
                     }
                     Ok(false) => {
                         let text = format!("surface map paused after {} points", m.probed.len());
@@ -1936,6 +2167,10 @@ impl Actor {
                     }
                     Err(e) => {
                         self.note(ConsoleKind::Error, format!("mapping stopped: {e}"));
+                        self.notify(Notice {
+                            title: "Surface map stopped".into(),
+                            body: e.clone(),
+                        });
                         self.state.probe.error = Some(e);
                         self.state.probe.can_back_off = self.back_off.is_some();
                     }
@@ -2299,6 +2534,7 @@ impl Actor {
             aborting: false,
         });
         self.job_started = Some(Instant::now());
+        self.job_aborted = false;
         self.job_seen = false;
         Ok(())
     }

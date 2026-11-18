@@ -200,6 +200,10 @@ depth probe really is T0, and that it triggers with `M494.1` sent (and not witho
   `G38.5`, and Recover does nothing more when the probe has already let go. The Z1 sometimes leaves
   the probe out (seen: the endstops and pins, then `ok`; the next `M119` had it), so it asks up to
   three times, and after a touch takes no answer as still pressed.
+- A touch stops right where the probe trips, so it can let go by itself before the `G38.5` that
+  should release it: seen surface mapping a compliant part on its slopes (`M119` said `Probe: 1`,
+  then `G38.5` was refused). The refusal comes before any motion, so Hobby Jogger unlocks (`$X`),
+  and if `M119` then reads free takes the probe as released where it is.
 - A guarded move that touches before moving at all, where the probe last let go or while it reads
   free, is the chatter again (seen after a halt partway through letting go): it steps 0.5 mm on
   with a plain move and carries on guarded. Anywhere else an instant touch is a real one.

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use hj_core::state::*;
 use hj_core::sync::{Patch, PatchOp, PathSegment};
-use hj_core::{Core, CoreError, Sink, StateUpdate};
+use hj_core::{Core, CoreError, Notice, Sink, StateUpdate};
 use serde_json::Value;
 
 /// Mirrors what the frontend does: applies patches in order and keeps the latest telemetry.
@@ -15,6 +15,9 @@ struct Mirror {
     state: Option<Value>,
     telemetry: Option<Telemetry>,
     console: Vec<ConsoleEntry>,
+    notices: Vec<Notice>,
+    /// Every change of [`AppState::busy`], in order.
+    busy: Vec<Option<String>>,
 }
 
 #[derive(Default)]
@@ -64,6 +67,12 @@ impl Sink for TestSink {
     }
     fn console(&self, entries: &[ConsoleEntry]) {
         self.0.lock().unwrap().console.extend_from_slice(entries);
+    }
+    fn notice(&self, notice: &Notice) {
+        self.0.lock().unwrap().notices.push(notice.clone());
+    }
+    fn busy(&self, busy: Option<&str>) {
+        self.0.lock().unwrap().busy.push(busy.map(str::to_owned));
     }
 }
 
@@ -378,6 +387,25 @@ async fn uploads_and_runs_jobs() {
                 .any(|e| e.kind == ConsoleKind::Sent && e.text == "G90")
     })
     .await;
+    {
+        let m = sink.0.lock().unwrap();
+        assert_eq!(
+            m.notices.last(),
+            Some(&Notice {
+                title: "Job stopped".into(),
+                body: "square run.nc was aborted".into()
+            })
+        );
+        assert!(
+            m.busy
+                .iter()
+                .any(|b| b.as_deref() == Some("running /sd/gcodes/square run.nc")),
+            "{:?}",
+            m.busy
+        );
+        assert_eq!(m.busy.last(), Some(&None));
+        assert_eq!(core.busy(), None);
+    }
 
     // Delete: success refreshes the listing; a missing file fails.
     core.request(Request::DeleteFile {
@@ -446,6 +474,9 @@ async fn uploads_and_runs_jobs() {
         state_of(m) == Some("idle") && m.state.as_ref().unwrap()["job"].is_null()
     })
     .await;
+    let last = sink.0.lock().unwrap().notices.last().cloned().unwrap();
+    assert_eq!(last.title, "Job finished");
+    assert!(last.body.starts_with("sim circle.nc in "), "{last:?}");
 }
 
 #[tokio::test]
@@ -1728,6 +1759,15 @@ async fn traces_outside_and_inside_contours() {
     let text = std::fs::read_to_string(&dxf).unwrap();
     assert_eq!(text.matches("VERTEX").count(), inside.len());
     std::fs::remove_file(&dxf).unwrap();
+    let notices = sink.0.lock().unwrap().notices.clone();
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|n| n.title == "Contour traced")
+            .count(),
+        2,
+        "{notices:?}"
+    );
 }
 
 #[tokio::test]
@@ -1925,4 +1965,173 @@ async fn resumes_a_contour_after_a_halt() {
         .sum::<f64>()
         / 2.0;
     assert!((area - 2000.0).abs() < 2.0, "area {area}");
+}
+
+#[tokio::test]
+async fn reconnects_after_the_link_drops() {
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+
+    // Dropped: it tries again and gets back.
+    let _ = core
+        .request(Request::Mdi {
+            line: "sim-drop-link".into(),
+        })
+        .await;
+    until(&sink, "reconnecting", |m| {
+        m.state.as_ref().unwrap()["connection"]["kind"] == "reconnecting"
+    })
+    .await;
+    until(&sink, "back", |m| {
+        m.state.as_ref().unwrap()["connection"]["kind"] == "connected"
+            && state_of(m) == Some("idle")
+    })
+    .await;
+    assert!(
+        sink.0
+            .lock()
+            .unwrap()
+            .console
+            .iter()
+            .any(|e| e.text == "reconnected")
+    );
+
+    // Disconnecting on purpose stops it trying.
+    let _ = core
+        .request(Request::Mdi {
+            line: "sim-drop-link".into(),
+        })
+        .await;
+    until(&sink, "reconnecting again", |m| {
+        m.state.as_ref().unwrap()["connection"]["kind"] == "reconnecting"
+    })
+    .await;
+    core.request(Request::Disconnect).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let m = sink.0.lock().unwrap();
+    assert_eq!(
+        m.state.as_ref().unwrap()["connection"]["kind"],
+        "disconnected"
+    );
+}
+
+#[tokio::test]
+async fn keeps_probe_settings_between_runs() {
+    let dir = std::env::temp_dir().join(format!("hj-keeps-{}", std::process::id()));
+    let path = dir.join("probing.json");
+    let settings = hj_core::probe::ProbeSettings {
+        ball_diameter: 4.0,
+        clearance: 7.0,
+        ..Default::default()
+    };
+    {
+        let sink = Arc::new(TestSink::default());
+        let core = Core::start_saving(sink.clone(), Some(path.clone()));
+        core.request(Request::SetProbeSettings {
+            settings: settings.clone(),
+        })
+        .await
+        .unwrap();
+        for _ in 0..40 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start_saving(sink.clone(), Some(path));
+    assert_eq!(core.snapshot().state.probe.settings, settings);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn maps_a_part_that_springs_back() {
+    use hj_core::map::MapSpec;
+
+    let sink = Arc::new(TestSink::default());
+    let core = Core::start(sink.clone());
+    core.request(Request::Connect {
+        target: ConnectTarget::Simulator,
+    })
+    .await
+    .unwrap();
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
+    for line in ["M493.2 T9999", "sim-springy"] {
+        core.request(Request::Mdi { line: line.into() })
+            .await
+            .unwrap();
+    }
+    core.request(Request::SetProbeSettings {
+        settings: hj_core::probe::ProbeSettings {
+            fast_feed: 600.0,
+            slow_feed: 300.0,
+            travel_feed: 1200.0,
+            ..Default::default()
+        },
+    })
+    .await
+    .unwrap();
+    core.request(Request::Mdi {
+        line: "G53 G0 X-75 Y-140 Z-62".into(),
+    })
+    .await
+    .unwrap();
+    until(&sink, "above the plate", |m| {
+        state_of(m) == Some("idle")
+            && m.telemetry
+                .as_ref()
+                .is_some_and(|t| (t.machine[2] + 62.0).abs() < 1e-6)
+    })
+    .await;
+
+    // Each touch lets go by itself once M119 has said it's pressed, so every release finds the
+    // probe already free: the map carries on regardless.
+    core.request(Request::MapSurface {
+        spec: MapSpec {
+            min: [-75.0, -140.0],
+            max: [-65.0, -135.0],
+            columns: 3,
+            rows: 2,
+            depth: 15.0,
+            precise: false,
+            levels: 0,
+            tolerance: 0.0,
+        },
+    })
+    .await
+    .unwrap();
+    until_for(&sink, "map done", 60, |m| {
+        let p = &m.state.as_ref().unwrap()["probe"];
+        p["running"].is_null() && (p["map"]["complete"] == true || !p["error"].is_null())
+    })
+    .await;
+    {
+        let m = sink.0.lock().unwrap();
+        let probe = &m.state.as_ref().unwrap()["probe"];
+        assert!(probe["error"].is_null(), "{probe}");
+        assert_eq!(probe["map"]["probed"].as_array().unwrap().len(), 6);
+        assert!(
+            probe["map"]["z"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|z| z.is_number()),
+            "{probe}"
+        );
+        // It happened: releases were refused, and unlocked.
+        assert!(
+            m.console
+                .iter()
+                .any(|e| e.text.contains("triggered before move"))
+        );
+    }
+    // Not left halted.
+    until(&sink, "idle", |m| state_of(m) == Some("idle")).await;
 }
