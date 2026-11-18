@@ -776,9 +776,9 @@ mod tests {
         let r = 1.0;
         let s = spec(3, 2);
         let mut map = SurfaceMap::new(s.clone(), 10.0);
-        for i in 0..6 {
+        for (i, z) in map.z.iter_mut().enumerate() {
             let [x, _] = s.at(i);
-            map.z[i] = Some(x + r * (2f64.sqrt() - 1.0));
+            *z = Some(x + r * (2f64.sqrt() - 1.0));
         }
         for p in surface(&map, r, true).into_iter().flatten() {
             assert!((p[2] - p[0]).abs() < 1e-9, "{p:?}");
